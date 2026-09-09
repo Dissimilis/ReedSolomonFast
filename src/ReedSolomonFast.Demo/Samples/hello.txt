@@ -1,0 +1,8 @@
+Hello from the ReedSolomonFast demo.
+
+This file is split into four data shards, two parity shards are computed, two of the
+six are deleted, and the file is rebuilt from the remaining four. Any four of the six
+would do, whichever ones survive.
+
+A few non-ASCII characters, so some letters take more than one byte:
+Ačiū, señor, Grüße, naïve café, 日本語, Ελληνικά.

@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Frozen copy of ReedSolomonFast, compiled under a DIFFERENT assembly name so that the benchmark
+    process can load the old and the new implementation side by side and measure them back to back
+    in one session. The default AssemblyLoadContext refuses two assemblies with the same simple name,
+    and an extern alias fixes compilation but not loading, so the snapshot gets its own name.
+    Namespaces and types stay identical; the benchmark project disambiguates with an extern alias.
+    See README.md in this folder for how to refresh the snapshot.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>ReedSolomonFast.Baseline</AssemblyName>
+    <RootNamespace>ReedSolomonFast</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsPackable>false</IsPackable>
+    <!-- Generated snapshot: do not fail the build on doc comments or analyzer nits here. -->
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="ReedSolomonFast.Benchmarks" />
+  </ItemGroup>
+
+</Project>

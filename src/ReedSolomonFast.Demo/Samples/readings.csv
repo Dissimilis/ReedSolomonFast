@@ -1,0 +1,10 @@
+timestamp,sensor,temperature_c,humidity_pct
+2026-03-01T00:00:00Z,north-wall,19.4,41
+2026-03-01T00:10:00Z,north-wall,19.3,41
+2026-03-01T00:20:00Z,north-wall,19.1,42
+2026-03-01T00:00:00Z,south-wall,21.0,38
+2026-03-01T00:10:00Z,south-wall,21.2,38
+2026-03-01T00:20:00Z,south-wall,21.1,37
+2026-03-01T00:00:00Z,attic,14.8,55
+2026-03-01T00:10:00Z,attic,14.6,56
+2026-03-01T00:20:00Z,attic,14.5,56

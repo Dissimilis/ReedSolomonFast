@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <RootNamespace>ReedSolomonFast</RootNamespace>
+    <NoWarn>CS1591</NoWarn>
+    <MinVerTagPrefix>v</MinVerTagPrefix>
+    <MinVerMinimumMajorMinor>1.0</MinVerMinimumMajorMinor>
+
+    <!-- NuGet package metadata -->
+    <PackageId>ReedSolomonFast</PackageId>
+    <Title>Reed-Solomon erasure coding for .NET (pure C#)</Title>
+    <Description>Reed-Solomon erasure coding for .NET in pure managed C#: no native libraries, no P/Invoke, no dependencies. SIMD accelerated GF(2^8) kernels (GFNI, AVX-512, AVX2, SSSE3, ARM NEON) with register blocking and Span overloads that let encode and verify run without allocating. Encode data into data + parity shards, verify them, and reconstruct any missing shards; parity is byte-compatible with Backblaze JavaReedSolomon, klauspost/reedsolomon and reed-solomon-erasure. A fully managed, AOT-friendly alternative to Intel ISA-L wrappers for storage, backup, RAID-like striping and network FEC.</Description>
+    <Authors>Marius Vitkevičius</Authors>
+    <Copyright>Copyright (c) 2026 Marius Vitkevičius</Copyright>
+    <PackageTags>reed-solomon;reedsolomon;erasure-coding;erasure;fec;forward-error-correction;galois-field;gf256;parity;raid;storage;backup;simd;avx2;avx512;gfni;ssse3;neon;intrinsics;managed;aot;csharp;dotnet</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/Dissimilis/ReedSolomonFast</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Dissimilis/ReedSolomonFast</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+    <EnablePackageValidation>true</EnablePackageValidation>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="ReedSolomonFast.Tests" />
+    <InternalsVisibleTo Include="ReedSolomonFast.Benchmarks" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\img\icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <!-- Build-time only (PrivateAssets): the shipped package has no dependencies. -->
+  <ItemGroup>
+    <PackageReference Include="MinVer" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

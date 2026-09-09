@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            kernel: ""
+          - os: ubuntu-latest
+            kernel: Scalar
+          - os: ubuntu-latest
+            kernel: Ssse3
+          - os: ubuntu-latest
+            kernel: Avx2
+          - os: windows-latest
+            kernel: ""
+          - os: ubuntu-24.04-arm
+            kernel: ""
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        fetch-depth: 0
+        filter: tree:0
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+      with:
+        global-json-file: global.json
+        cache: false
+
+    - name: Restore
+      run: dotnet restore ReedSolomonFast.sln
+
+    - name: Build
+      run: dotnet build ReedSolomonFast.sln -c Release --no-restore
+
+    - name: Test
+      env:
+        REEDSOLOMONFAST_KERNEL: ${{ matrix.kernel }}
+      run: dotnet test src/ReedSolomonFast.Tests -c Release --no-build --blame-hang-timeout 120s
+
+    - name: Run the demo from another directory (its own checks decide the exit code)
+      env:
+        REEDSOLOMONFAST_KERNEL: ${{ matrix.kernel }}
+      shell: bash
+      working-directory: ${{ runner.temp }}
+      run: dotnet "$GITHUB_WORKSPACE/src/ReedSolomonFast.Demo/bin/Release/net10.0/ReedSolomonFast.Demo.dll"
+
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        fetch-depth: 0
+        filter: tree:0
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+      with:
+        global-json-file: global.json
+        cache: false
+
+    - name: Pack
+      run: dotnet pack src/ReedSolomonFast -c Release --output ./nupkgs
+
+    - name: Check package contents
+      run: |
+        set -e
+        pkg=$(ls ./nupkgs/ReedSolomonFast.*.nupkg)
+        unzip -l "$pkg"
+        for f in README.md icon.png lib/net10.0/ReedSolomonFast.dll lib/net10.0/ReedSolomonFast.xml; do
+          unzip -l "$pkg" | grep -q " $f\$" || { echo "missing $f in package"; exit 1; }
+        done
+        if unzip -p "$pkg" ReedSolomonFast.nuspec | grep -q '<dependency '; then echo "package must have no dependencies"; exit 1; fi
+
+  native-aot:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        fetch-depth: 0
+        filter: tree:0
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+      with:
+        global-json-file: global.json
+        cache: false
+
+    - name: Publish a NativeAOT app that encodes and reconstructs
+      run: |
+        set -e
+        mkdir -p /tmp/aot && cd /tmp/aot
+        dotnet new console -n AotSmoke -o . --force > /dev/null
+        dotnet add AotSmoke.csproj reference "$GITHUB_WORKSPACE/src/ReedSolomonFast/ReedSolomonFast.csproj" > /dev/null
+        cat > Program.cs <<'EOF'
+        using ReedSolomonFast;
+        var rs = new ReedSolomon(10, 4);
+        var shards = new byte[14][];
+        var rng = new Random(1);
+        for (int i = 0; i < 14; i++) { shards[i] = new byte[1000]; if (i < 10) rng.NextBytes(shards[i]); }
+        rs.Encode(shards);
+        var copy = shards.Select(s => s.ToArray()).ToArray();
+        var present = Enumerable.Repeat(true, 14).ToArray();
+        present[0] = present[5] = present[11] = false;
+        foreach (int i in new[] { 0, 5, 11 }) Array.Clear(copy[i]);
+        rs.Reconstruct(copy, present);
+        for (int i = 0; i < 14; i++) if (!shards[i].AsSpan().SequenceEqual(copy[i])) { Console.WriteLine($"shard {i} differs"); return 1; }
+        Console.WriteLine($"ok {rs.Kernel} {(rs.Verify(shards) ? "verified" : "unverified")}");
+        return 0;
+        EOF
+        dotnet publish AotSmoke.csproj -c Release -r linux-x64 -p:PublishAot=true -p:TreatWarningsAsErrors=true -o out
+        ./out/AotSmoke

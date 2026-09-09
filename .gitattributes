@@ -1,0 +1,2 @@
+# The demo samples are fixtures; keep their bytes exactly as committed.
+src/ReedSolomonFast.Demo/Samples/** -text

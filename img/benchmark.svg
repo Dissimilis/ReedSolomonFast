@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="480" viewBox="0 0 960 480" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+<rect width="960" height="480" fill="#ffffff"/>
+<text x="78" y="26" font-size="17" font-weight="600" fill="#1b1b1b">Reed-Solomon encode throughput on .NET, 10+4 shards. Higher is better</text>
+<text x="78" y="45" font-size="12" fill="#5a5a5a">Single thread, AMD Ryzen 7 PRO 7840U, .NET 10. Data + parity bytes per second, log scale.</text>
+<line x1="78" y1="409.0" x2="660" y2="409.0" stroke="#e9e9e9" stroke-width="1"/>
+<text x="68" y="413.0" font-size="11" fill="#6a6a6a" text-anchor="end">0.01</text>
+<line x1="78" y1="380.8" x2="660" y2="380.8" stroke="#e9e9e9" stroke-width="1"/>
+<text x="68" y="384.8" font-size="11" fill="#6a6a6a" text-anchor="end">0.02</text>
+<line x1="78" y1="343.6" x2="660" y2="343.6" stroke="#e9e9e9" stroke-width="1"/>
+<text x="68" y="347.6" font-size="11" fill="#6a6a6a" text-anchor="end">0.05</text>
+<line x1="78" y1="315.4" x2="660" y2="315.4" stroke="#e9e9e9" stroke-width="1"/>
+<text x="68" y="319.4" font-size="11" fill="#6a6a6a" text-anchor="end">0.1</text>
+<line x1="78" y1="287.2" x2="660" y2="287.2" stroke="#e9e9e9" stroke-width="1"/>
+<text x="68" y="291.2" font-size="11" fill="#6a6a6a" text-anchor="end">0.2</text>
+<line x1="78" y1="250.0" x2="660" y2="250.0" stroke="#e9e9e9" stroke-width="1"/>
+<text x="68" y="254.0" font-size="11" fill="#6a6a6a" text-anchor="end">0.5</text>
+<line x1="78" y1="221.8" x2="660" y2="221.8" stroke="#e9e9e9" stroke-width="1"/>
+<text x="68" y="225.8" font-size="11" fill="#6a6a6a" text-anchor="end">1</text>
+<line x1="78" y1="193.6" x2="660" y2="193.6" stroke="#e9e9e9" stroke-width="1"/>
+<text x="68" y="197.6" font-size="11" fill="#6a6a6a" text-anchor="end">2</text>
+<line x1="78" y1="156.4" x2="660" y2="156.4" stroke="#e9e9e9" stroke-width="1"/>
+<text x="68" y="160.4" font-size="11" fill="#6a6a6a" text-anchor="end">5</text>
+<line x1="78" y1="128.2" x2="660" y2="128.2" stroke="#e9e9e9" stroke-width="1"/>
+<text x="68" y="132.2" font-size="11" fill="#6a6a6a" text-anchor="end">10</text>
+<line x1="78" y1="100.0" x2="660" y2="100.0" stroke="#e9e9e9" stroke-width="1"/>
+<text x="68" y="104.0" font-size="11" fill="#6a6a6a" text-anchor="end">20</text>
+<line x1="78" y1="62.8" x2="660" y2="62.8" stroke="#e9e9e9" stroke-width="1"/>
+<text x="68" y="66.8" font-size="11" fill="#6a6a6a" text-anchor="end">50</text>
+<text x="20" y="236" font-size="12" fill="#4a4a4a" transform="rotate(-90 20 236)" text-anchor="middle">Throughput (GB/s, log scale)</text>
+<line x1="78.0" y1="418" x2="78.0" y2="423" stroke="#b0b0b0"/>
+<text x="78.0" y="438" font-size="10.5" fill="#6a6a6a" text-anchor="middle">4 KiB</text>
+<line x1="369.0" y1="418" x2="369.0" y2="423" stroke="#b0b0b0"/>
+<text x="369.0" y="438" font-size="10.5" fill="#6a6a6a" text-anchor="middle">64 KiB</text>
+<line x1="660.0" y1="418" x2="660.0" y2="423" stroke="#b0b0b0"/>
+<text x="660.0" y="438" font-size="10.5" fill="#6a6a6a" text-anchor="middle">1 MiB</text>
+<line x1="78" y1="418" x2="660" y2="418" stroke="#9a9a9a" stroke-width="1.2"/>
+<text x="369" y="464" font-size="12" fill="#4a4a4a" text-anchor="middle">Shard size</text>
+<path d="M78.0,397.2 L369.0,393.8" fill="none" stroke="#8c8c8c" stroke-width="1.9" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="78.0" cy="397.2" r="2.6" fill="#8c8c8c"/>
+<circle cx="369.0" cy="393.8" r="2.6" fill="#8c8c8c"/>
+<path d="M78.0,259.1 L369.0,260.8 L660.0,260.0" fill="none" stroke="#e8863c" stroke-width="1.9" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="78.0" cy="259.1" r="2.6" fill="#e8863c"/>
+<circle cx="369.0" cy="260.8" r="2.6" fill="#e8863c"/>
+<circle cx="660.0" cy="260.0" r="2.6" fill="#e8863c"/>
+<path d="M78.0,78.4 L369.0,70.5 L660.0,108.4" fill="none" stroke="#2e7d32" stroke-width="3.0" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="78.0" cy="78.4" r="3.4" fill="#2e7d32"/>
+<circle cx="369.0" cy="70.5" r="3.4" fill="#2e7d32"/>
+<circle cx="660.0" cy="108.4" r="3.4" fill="#2e7d32"/>
+<text x="684" y="62" font-size="11.5" font-weight="600" fill="#3a3a3a">Implementation</text>
+<line x1="684" y1="76" x2="712" y2="76" stroke="#8c8c8c" stroke-width="3"/>
+<circle cx="698" cy="76" r="3.2" fill="#8c8c8c"/>
+<text x="720" y="80" font-size="11.5" font-weight="400" fill="#2b2b2b">ReedSolomon (Witteborn), scalar</text>
+<text x="720" y="95" font-size="10" fill="#7a7a7a">peak 0.01 GB/s</text>
+<line x1="684" y1="112" x2="712" y2="112" stroke="#e8863c" stroke-width="3"/>
+<circle cx="698" cy="112" r="3.2" fill="#e8863c"/>
+<text x="720" y="116" font-size="11.5" font-weight="400" fill="#2b2b2b">ReedSolomon.NET, scalar</text>
+<text x="720" y="131" font-size="10" fill="#7a7a7a">peak 0.40 GB/s</text>
+<line x1="684" y1="148" x2="712" y2="148" stroke="#2e7d32" stroke-width="3"/>
+<circle cx="698" cy="148" r="3.2" fill="#2e7d32"/>
+<text x="720" y="152" font-size="11.5" font-weight="600" fill="#2b2b2b">ReedSolomonFast (this library)</text>
+<text x="720" y="167" font-size="10" fill="#7a7a7a">peak 41.39 GB/s</text>
+</svg>

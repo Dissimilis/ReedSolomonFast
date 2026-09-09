@@ -1,0 +1,42 @@
+## .NET / Visual Studio
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.vs/
+.vscode/
+.idea/
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+artifacts/
+
+# BenchmarkDotNet
+BenchmarkDotNet.Artifacts/
+
+TestResults/
+*.trx
+coverage/
+*.coverage
+*.cobertura.xml
+Thumbs.db
+.DS_Store
+
+# Local development notes
+*.local.*
+experiments.md
+
+# Machine-local encrypted server credentials
+credentials/
+backup/
+docs/
+scripts/
