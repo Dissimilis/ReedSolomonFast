@@ -4,6 +4,8 @@ A pure managed C# implementation of Reed-Solomon erasure coding over GF(2^8) for
 
 Erasure coding turns N data shards into N + M shards such that any N of them rebuild the rest. It is the mechanism behind RAID-6 and beyond, object storage durability, backup splitting across drives or providers, and forward error correction over lossy links. This library brings it to C# / .NET as a single fully managed, Native AOT-friendly NuGet package that runs everywhere .NET runs.
 
+<img src="img/erasure.svg" alt="Four data and two parity shards; any four of the six rebuild the file" width="820">
+
 [![NuGet](https://img.shields.io/nuget/v/ReedSolomonFast.svg)](https://www.nuget.org/packages/ReedSolomonFast)
 [![NuGet Downloads](https://img.shields.io/nuget/dt/ReedSolomonFast.svg)](https://www.nuget.org/packages/ReedSolomonFast)
 [![CI](https://github.com/Dissimilis/ReedSolomonFast/actions/workflows/ci.yml/badge.svg)](https://github.com/Dissimilis/ReedSolomonFast/actions/workflows/ci.yml)
