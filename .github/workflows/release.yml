@@ -14,6 +14,12 @@ env:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Trusted publishing: nuget.org trusts this repository, this workflow file and this
+    # environment through GitHub's OIDC token, so there is no long-lived API key to store.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
     steps:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       with:
@@ -45,5 +51,11 @@ jobs:
         case "$tag" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "tag '$tag' is not vX.Y.Z"; exit 1;; esac
         ls ./nupkgs/ReedSolomonFast.${tag#v}.nupkg
 
+    - name: Log in to nuget.org
+      id: login
+      uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+      with:
+        user: Dissimilis
+
     - name: Push to NuGet
-      run: dotnet nuget push ./nupkgs/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+      run: dotnet nuget push ./nupkgs/*.nupkg --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
