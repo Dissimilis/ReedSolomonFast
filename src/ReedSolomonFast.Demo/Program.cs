@@ -65,27 +65,30 @@ internal static class Program
         Console.WriteLine($"ReedSolomonFast demo. Results go to {runDirectory}");
 
         bool allPassed = true;
+        byte[]? firstOriginal = null;
         byte[][]? firstEncoded = null;
         foreach (string input in inputs)
         {
             Console.WriteLine();
             string sampleDirectory = Path.Combine(runDirectory, Path.GetFileNameWithoutExtension(input));
             Directory.CreateDirectory(sampleDirectory);
-            allPassed &= RecoverFile(input, sampleDirectory, out byte[][] encoded);
+            allPassed &= RecoverFile(input, sampleDirectory, out byte[] original, out byte[][] encoded);
+            firstOriginal ??= original;
             firstEncoded ??= encoded;
         }
 
-        // The three follow-ups run once, on copies of the first input's shards.
+        // The follow-ups run once, on copies of the first input's shards.
         Console.WriteLine();
         var rs = new ReedSolomon(DataShards, ParityShards);
         if (firstEncoded![0].Length == 0)
         {
             Console.WriteLine("The input is empty, so the follow-ups use a built-in 64-byte block instead.");
-            firstEncoded = DemoScenarios.BuiltInBlock(rs);
+            (firstOriginal, firstEncoded) = DemoScenarios.BuiltInBlock(rs);
         }
 
         allPassed &= DemoScenarios.TooManyMissing(rs, firstEncoded);
-        allPassed &= DemoScenarios.CorruptionDetection(rs, firstEncoded);
+        allPassed &= DemoScenarios.ChecksumRecovery(rs, firstOriginal!, firstEncoded);
+        allPassed &= DemoScenarios.BlockRecovery(rs, firstOriginal!, firstEncoded);
         allPassed &= DemoScenarios.IncrementalParity(rs, firstEncoded);
 
         Console.WriteLine();
@@ -97,10 +100,10 @@ internal static class Program
 
     /// <summary>Split, encode, lose two shards, recover from disk alone, join and compare.</summary>
     /// <remarks>Returns false when a check fails. <paramref name="encoded"/> gets the six shards either way.</remarks>
-    private static bool RecoverFile(string inputPath, string sampleDirectory, out byte[][] encoded)
+    private static bool RecoverFile(string inputPath, string sampleDirectory, out byte[] original, out byte[][] encoded)
     {
         string name = Path.GetFileName(inputPath);
-        byte[] original = File.ReadAllBytes(inputPath);
+        original = File.ReadAllBytes(inputPath);
         var rs = new ReedSolomon(DataShards, ParityShards);
 
         Console.WriteLine($"File: {name} ({original.Length:N0} bytes), output in {Path.GetFileName(sampleDirectory)}{Path.DirectorySeparatorChar}");
@@ -114,14 +117,16 @@ internal static class Program
         if (!rs.Verify(encoded)) return Fail("parity does not verify right after Encode");
         int shardLength = rs.GetShardLength(original.Length);
         int padding = rs.GetPaddingLength(original.Length);
-        Console.WriteLine($"Encoded {encoded.Length} shards of {shardLength:N0} bytes each; the last data shard ends with {padding} padding byte{(padding == 1 ? "" : "s")}. Parity verified.");
+        Console.WriteLine($"Encoded {encoded.Length} shards of {shardLength:N0} bytes each; the data was padded with {padding} zero byte{(padding == 1 ? "" : "s")}. Parity verified.");
         Console.WriteLine($"  {string.Join(" ", Enumerable.Range(0, encoded.Length).Select(ShardFileName))}");
 
         // 2. The shards do not record the original length, so Join could not strip the padding
-        //    without it. The manifest keeps it, with the geometry and matrix the decoder must match.
-        Console.WriteLine("  The shards do not store the file length; manifest.json keeps it for Join.");
+        //    without it. The manifest keeps it, with the geometry and matrix the decoder must match,
+        //    and a SHA-256 per shard so the decoder can tell a damaged shard from a good one.
+        Console.WriteLine("  The shards do not store the file length; manifest.json keeps it for Join, plus a SHA-256 per shard.");
         string manifestPath = Path.Combine(sampleDirectory, "manifest.json");
-        new Manifest(name, original.Length, DataShards, ParityShards, shardLength, MatrixKind.Vandermonde).Save(manifestPath);
+        string[] digests = encoded.Select(s => Sha256(s)).ToArray();
+        new Manifest(name, original.Length, DataShards, ParityShards, shardLength, MatrixKind.Vandermonde, digests).Save(manifestPath);
 
         // 3. Lose one data shard and one parity shard: only the surviving four are copied.
         string damaged = Path.Combine(sampleDirectory, "damaged");
@@ -132,24 +137,43 @@ internal static class Program
         Console.WriteLine($"Simulated loss: {string.Join(", ", LostShards.Select(i => $"{ShardFileName(i)} ({(i < DataShards ? "data" : "parity")})"))}");
 
         // 4. Recovery starts from disk only: the manifest, the four remaining files, a new coder.
+        //    A shard that is missing, has the wrong length or does not match its digest is an
+        //    erasure, a null entry. Reconstruct rebuilds only what it is told is missing and
+        //    trusts every shard it is given, so this check is what keeps a damaged shard out.
         Manifest stored = Manifest.Load(manifestPath);
         var decoder = new ReedSolomon(stored.DataShards, stored.ParityShards, new ReedSolomonOptions { Matrix = stored.Matrix });
         byte[]?[] loaded = new byte[]?[decoder.TotalShards];
+        int trusted = 0;
         for (int i = 0; i < loaded.Length; i++)
         {
             string path = Path.Combine(damaged, ShardFileName(i));
-            if (!File.Exists(path)) continue;   // a null entry marks a missing shard
+            if (!File.Exists(path)) continue;
             byte[] shard = File.ReadAllBytes(path);
             if (shard.Length != stored.ShardLength)
-                return Fail($"{ShardFileName(i)} is {shard.Length} bytes, the manifest says {stored.ShardLength}");
+            {
+                Console.WriteLine($"  {ShardFileName(i)} is {shard.Length} bytes, the manifest says {stored.ShardLength}; treated as missing.");
+                continue;
+            }
+
+            if (Sha256(shard) != stored.ShardDigests[i])
+            {
+                Console.WriteLine($"  {ShardFileName(i)} does not match its digest; treated as missing.");
+                continue;
+            }
+
             loaded[i] = shard;
+            trusted++;
         }
 
-        decoder.Reconstruct(loaded);   // allocates and fills the null entries in place
-        byte[][] recovered = loaded!;  // no entry is null after Reconstruct
+        Console.WriteLine($"Read {trusted} shards back; each has the length and SHA-256 the manifest recorded.");
+        if (!decoder.TryReconstruct(loaded))   // allocates and fills the null entries in place
+            return Fail($"only {trusted} trusted shards remain and {decoder.DataShards} are needed");
+        byte[][] recovered = loaded!;           // no entry is null after a successful TryReconstruct
         if (!decoder.Verify(recovered)) return Fail("parity does not verify after Reconstruct");
+        for (int i = 0; i < recovered.Length; i++)
+            if (Sha256(recovered[i]) != stored.ShardDigests[i]) return Fail($"rebuilt {ShardFileName(i)} does not match its digest");
         WriteShards(Path.Combine(sampleDirectory, "recovered"), recovered);
-        Console.WriteLine("Recovered both missing shards. Parity verified.");
+        Console.WriteLine("Recovered both missing shards. Parity verified; all six digests match.");
 
         // 5. Join the data shards into a file of the original length and compare.
         byte[] restored = decoder.Join(recovered, stored.OriginalLength);
@@ -178,7 +202,7 @@ internal static class Program
             File.WriteAllBytes(Path.Combine(directory, ShardFileName(i)), shards[i]);
     }
 
-    private static string Sha256(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
+    public static string Sha256(ReadOnlySpan<byte> bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
 
     private static string OptionValue(string[] args, ref int i)
     {

@@ -2,8 +2,20 @@
 
 A console app that takes a file through the whole erasure-coding workflow: split it into four
 data shards, compute two parity shards, delete one of each, rebuild the file from the four that
-remain, and check that its bytes match. Three short follow-ups show the recovery limit,
-corruption detection, and incremental parity with `EncodeShards`, `EncodeShard` and `Update`.
+remain, and check that its bytes match. Four short follow-ups show the recovery limit, two
+kinds of checksum-assisted repair, and incremental parity with `EncodeShards`, `EncodeShard`
+and `Update`.
+
+The checksum follow-ups make a point the walkthrough cannot: `Verify` says a stripe is
+inconsistent, not which shard is wrong, and `Reconstruct` trusts every shard marked present and
+rebuilds only those marked missing. A SHA-256 per shard, taken at encode time and kept in the
+manifest, is what turns "something is wrong" into "these two are wrong", so they can be marked
+missing and rebuilt. The block follow-up keeps a separate digest per block, in memory, taken
+before the damage: with three shards damaged in three different places, whole-shard digests
+leave too few shards to rebuild from, but each damaged block still has five intact slices at
+the same offset and is rebuilt through the `Memory` slice overloads, touching nothing else.
+Nothing from the block follow-up is written to disk. The digests only catch accidental damage;
+an unsigned manifest does not authenticate anything.
 
 From the repository root, with the .NET 10 SDK installed:
 
@@ -35,9 +47,9 @@ directory, and prints its absolute path. Every input gets its own subdirectory:
 | Entry | Contents |
 |---|---|
 | `encoded/` | All six shards as written by `Split` and `Encode`. |
-| `manifest.json` | The original filename and length, geometry and matrix kind. `Split` does not store the length, so `Join` needs it from here, and the decoder is built from the geometry and matrix. |
+| `manifest.json` | The original filename and length, geometry, matrix kind and a SHA-256 per shard. `Split` does not store the length, so `Join` needs it from here; the decoder is built from the geometry and matrix; the digests decide which shards read back can be trusted. |
 | `damaged/` | The four surviving shards; `shard-01.bin` and `shard-05.bin` are missing. |
-| `recovered/` | All six shards after `Reconstruct` from the damaged directory. |
+| `recovered/` | All six shards after `Reconstruct` from the damaged directory. A shard that is missing, has the wrong length or fails its digest counts as missing. |
 | `restored/` | The rebuilt file, byte-identical to the input. |
 
 Recovery reads only the manifest and the damaged directory. The input file and earlier runs are
