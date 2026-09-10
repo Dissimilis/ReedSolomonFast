@@ -113,6 +113,17 @@ var tuned = new ReedSolomon(10, 4, new ReedSolomonOptions
     InversionCache = true,                  // remembers the inverted matrix per erasure pattern
 });
 Console.WriteLine(ReedSolomon.BestSupportedKernel);   // e.g. GfniAvx512
+
+// Shards too large for memory: the same bytes, from and to streams, one 64 KiB window at a time.
+// Data shard i is bytes [i * shardLength, (i + 1) * shardLength) of the zero-padded file, as Split
+// lays it out; the caller supplies the padding. Every stream is read or written from its current
+// position, so open fresh streams for each call. Nothing is sought, flushed or disposed.
+long shardLength = (fileLength + rs.DataShards - 1) / rs.DataShards;
+await ReedSolomonStreams.EncodeAsync(rs, dataStreams, parityStreams, shardLength);
+Stream?[] inputs = OpenShards();  inputs[2] = null;                    // shard 2 is lost
+Stream?[] outputs = new Stream?[rs.TotalShards]; outputs[2] = rebuilt; // ask for it back
+await ReedSolomonStreams.ReconstructAsync(rs, inputs, outputs, shardLength);
+bool ok = await ReedSolomonStreams.VerifyAsync(rs, OpenShards(), shardLength);   // all six, shard 2 restored
 ```
 
 ## Public API
@@ -124,6 +135,8 @@ Console.WriteLine(ReedSolomon.BestSupportedKernel);   // e.g. GfniAvx512
 | `MatrixKind` | `Vandermonde` (Backblaze construction, the default) or `Cauchy`. |
 | `KernelTier` | `Scalar`, `AdvSimd`, `Ssse3`, `Avx2`, `Avx512`, `GfniAvx2`, `GfniAvx512`. |
 | `InsufficientShardsException` | Thrown by `Reconstruct` and `Join` when fewer shards are present than needed; carries `Present` and `Required`. Nothing is written when it is thrown. |
+| `ReedSolomonStreams` | Static `EncodeAsync`, `ReconstructAsync`, `VerifyAsync` over `Stream`s, window by window, memory bounded by the window rather than the shard. Same bytes as the in-memory API. A completed call has read exactly `shardLength` bytes per participating input from its current position and written exactly that many per output; a short input throws `EndOfStreamException`, `VerifyAsync` stops at the first mismatch. Never seeks, pads, flushes or disposes. |
+| `ReedSolomonStreamingOptions` | `WindowSizeBytes` (default 64 KiB per shard), `MaxConcurrentIoOperations` (default 4). |
 
 ## Performance
 
