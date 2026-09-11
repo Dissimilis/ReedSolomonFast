@@ -89,29 +89,29 @@ internal static unsafe class Kernel
     /// Every branch below is a static call to a JIT-specialized generic, so once <paramref name="tier"/>
     /// is known the body is the same code a per-tier class would have produced.
     /// </summary>
-    public static void DotProduct(KernelTier tier, byte** srcs, int srcCount, byte** dsts, int dstCount, byte* tables, byte* gfni, nuint len, bool accumulate = false)
+    public static void DotProduct(KernelTier tier, byte** srcs, int srcCount, byte** dsts, int dstCount, byte* tables, byte* gfni, nuint len, bool accumulate = false, bool stream = false)
     {
         if (len == 0 || dstCount == 0) return;
 
         switch (tier)
         {
             case KernelTier.GfniAvx512:
-                VectorKernel<GfniAvx512Vec>.DotProduct(srcs, srcCount, dsts, dstCount, tables, gfni, len, accumulate);
+                VectorKernel<GfniAvx512Vec>.DotProduct(srcs, srcCount, dsts, dstCount, tables, gfni, len, accumulate, stream);
                 break;
             case KernelTier.GfniAvx2:
-                VectorKernel<GfniAvx2Vec>.DotProduct(srcs, srcCount, dsts, dstCount, tables, gfni, len, accumulate);
+                VectorKernel<GfniAvx2Vec>.DotProduct(srcs, srcCount, dsts, dstCount, tables, gfni, len, accumulate, stream);
                 break;
             case KernelTier.Avx512:
-                VectorKernel<Avx512Vec>.DotProduct(srcs, srcCount, dsts, dstCount, tables, gfni, len, accumulate);
+                VectorKernel<Avx512Vec>.DotProduct(srcs, srcCount, dsts, dstCount, tables, gfni, len, accumulate, stream);
                 break;
             case KernelTier.Avx2:
-                VectorKernel<Avx2Vec>.DotProduct(srcs, srcCount, dsts, dstCount, tables, gfni, len, accumulate);
+                VectorKernel<Avx2Vec>.DotProduct(srcs, srcCount, dsts, dstCount, tables, gfni, len, accumulate, stream);
                 break;
             case KernelTier.Ssse3:
-                VectorKernel<Ssse3Vec>.DotProduct(srcs, srcCount, dsts, dstCount, tables, gfni, len, accumulate);
+                VectorKernel<Ssse3Vec>.DotProduct(srcs, srcCount, dsts, dstCount, tables, gfni, len, accumulate, stream);
                 break;
             case KernelTier.AdvSimd:
-                VectorKernel<AdvSimdVec>.DotProduct(srcs, srcCount, dsts, dstCount, tables, gfni, len, accumulate);
+                VectorKernel<AdvSimdVec>.DotProduct(srcs, srcCount, dsts, dstCount, tables, gfni, len, accumulate, stream);
                 break;
             default:
                 ScalarKernel.DotProduct(srcs, srcCount, dsts, dstCount, tables, 0, len, accumulate);

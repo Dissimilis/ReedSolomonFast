@@ -119,6 +119,37 @@ internal static unsafe class Kernel
         }
     }
 
+    /// <summary>dst ^= c * (a ^ b) for <paramref name="len"/> bytes on the given tier; <paramref name="table"/> and <paramref name="gfni"/> point at the entry for c.</summary>
+    public static void AccumulateDelta(KernelTier tier, byte* dst, byte* a, byte* b, byte* table, byte* gfni, nuint len)
+    {
+        if (len == 0) return;
+
+        switch (tier)
+        {
+            case KernelTier.GfniAvx512:
+                VectorKernel<GfniAvx512Vec>.AccumulateDelta(dst, a, b, table, gfni, len);
+                break;
+            case KernelTier.GfniAvx2:
+                VectorKernel<GfniAvx2Vec>.AccumulateDelta(dst, a, b, table, gfni, len);
+                break;
+            case KernelTier.Avx512:
+                VectorKernel<Avx512Vec>.AccumulateDelta(dst, a, b, table, gfni, len);
+                break;
+            case KernelTier.Avx2:
+                VectorKernel<Avx2Vec>.AccumulateDelta(dst, a, b, table, gfni, len);
+                break;
+            case KernelTier.Ssse3:
+                VectorKernel<Ssse3Vec>.AccumulateDelta(dst, a, b, table, gfni, len);
+                break;
+            case KernelTier.AdvSimd:
+                VectorKernel<AdvSimdVec>.AccumulateDelta(dst, a, b, table, gfni, len);
+                break;
+            default:
+                ScalarKernel.MulAddDelta(dst, a, b, Gf256.MulPointer + (table[1] << 8), len);
+                break;
+        }
+    }
+
     private static KernelTier ResolveDefault()
     {
         string? name = Environment.GetEnvironmentVariable(EnvironmentVariable);

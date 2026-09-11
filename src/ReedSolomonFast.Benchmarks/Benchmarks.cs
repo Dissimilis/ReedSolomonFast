@@ -64,6 +64,10 @@ public class OptimizationBenchmarks
     private Memory<byte>[] _paddedParity = null!;
     private ReadOnlyMemory<byte>[] _paddedDataBefore = null!;
     private Memory<byte>[] _paddedParityBefore = null!;
+    private ReadOnlyMemory<byte>[] _paddedAll = null!;
+    private ReadOnlyMemory<byte>[] _paddedAllBefore = null!;
+    private ReadOnlyMemory<byte>[] _changedOld = null!;
+    private ReadOnlyMemory<byte>[] _changedNew = null!;
     private ReadOnlyMemory<byte>[][] _ringData = null!;
     private Memory<byte>[][] _ringParity = null!;
     private int _ring;
@@ -112,6 +116,11 @@ public class OptimizationBenchmarks
         for (int i = 0; i < data + parity; i++) _shards[i].CopyTo(paddedBefore[i]);
         _paddedDataBefore = paddedBefore.Take(data).Select(m => (ReadOnlyMemory<byte>)m).ToArray();
         _paddedParityBefore = paddedBefore.Skip(data).ToArray();
+        _paddedAll = padded.Select(m => (ReadOnlyMemory<byte>)m).ToArray();
+        _paddedAllBefore = paddedBefore.Select(m => (ReadOnlyMemory<byte>)m).ToArray();
+        var changed = Geometry.Shards(8, Shard_Size, 7);
+        _changedOld = changed.Take(4).Select(s => (ReadOnlyMemory<byte>)s).ToArray();
+        _changedNew = changed.Skip(4).Select(s => (ReadOnlyMemory<byte>)s).ToArray();
 
         // A ring of padded stripes totalling about three times a 16 MB L3, one per call, so
         // inputs and outputs are cold every time, as they are for a caller streaming data through.
@@ -241,6 +250,13 @@ public class OptimizationBenchmarks
     [Benchmark(Description = "after:  Verify")]
     public bool AfterVerify() => _current.Verify(_shards);
 
+    // The same on the AllocateShards layout: what a caller who followed the README sees.
+    [Benchmark(Description = "before: Verify padded")]
+    public bool BeforeVerifyPadded() => _baseline.Verify(_paddedAllBefore);
+
+    [Benchmark(Description = "after:  Verify padded")]
+    public bool AfterVerifyPadded() => _current.Verify(_paddedAll);
+
     // Incremental parity: one EncodeShard per data shard. Clearing parity first is part of the
     // protocol and costs the same on both sides.
     [Benchmark(Description = "before: EncodeShard x data")]
@@ -258,6 +274,20 @@ public class OptimizationBenchmarks
         for (int i = 0; i < _data.Length; i++) _current.EncodeShard(i, _data[i].Span, _parity);
         return _parity[0].Span[0];
     }
+
+    // Update: one changed shard, then four, old and new as separate arrays like the data. The
+    // parity drifts from call to call, which changes nothing about the work.
+    [Benchmark(Description = "before: Update 1")]
+    public byte BeforeUpdate1() { _baseline.Update([2], _changedOld.AsSpan(0, 1), _changedNew.AsSpan(0, 1), _parity); return _parity[0].Span[0]; }
+
+    [Benchmark(Description = "after:  Update 1")]
+    public byte AfterUpdate1() { _current.Update([2], _changedOld.AsSpan(0, 1), _changedNew.AsSpan(0, 1), _parity); return _parity[0].Span[0]; }
+
+    [Benchmark(Description = "before: Update 4")]
+    public byte BeforeUpdate4() { _baseline.Update([0, 1, 2, 3], _changedOld, _changedNew, _parity); return _parity[0].Span[0]; }
+
+    [Benchmark(Description = "after:  Update 4")]
+    public byte AfterUpdate4() { _current.Update([0, 1, 2, 3], _changedOld, _changedNew, _parity); return _parity[0].Span[0]; }
 
     // The batch form has no baseline counterpart; compare it with the row above by eye.
     [Benchmark(Description = "after:  EncodeShards batch")]

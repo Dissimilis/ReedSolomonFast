@@ -23,8 +23,14 @@ internal unsafe interface IGfVector<TSelf> where TSelf : unmanaged, IGfVector<TS
     /// </summary>
     static abstract int Unroll4 { get; }
 
+    /// <summary>Eight outputs per pass: eight accumulators, eight multipliers and one data vector. Only where a multiplier is one register and 32 exist (GFNI-512).</summary>
+    static abstract bool Block8 { get; }
+
     static abstract TSelf Load(byte* p);
     static abstract void Store(byte* p, TSelf v);
+
+    /// <summary>Non-temporal store; <paramref name="p"/> must be aligned to the vector width. Plain store where the ISA has none.</summary>
+    static abstract void StoreStream(byte* p, TSelf v);
     static abstract TSelf Xor(TSelf a, TSelf b);
 
     /// <summary>Loads the primary multiplier for one table entry, broadcast to every lane: the low nibble table, or the GFNI matrix.</summary>
@@ -47,12 +53,16 @@ internal readonly unsafe struct Ssse3Vec : IGfVector<Ssse3Vec>
 
     public static bool IsSupported => Ssse3.IsSupported;
     public static int Unroll4 => 1;
+    public static bool Block8 => false;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Ssse3Vec Load(byte* p) => new(Vector128.Load(p));
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Store(byte* p, Ssse3Vec v) => v.V.Store(p);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void StoreStream(byte* p, Ssse3Vec v) => Sse2.StoreAlignedNonTemporal(p, v.V);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Ssse3Vec Xor(Ssse3Vec a, Ssse3Vec b) => new(a.V ^ b.V);
@@ -83,12 +93,16 @@ internal readonly unsafe struct Avx2Vec : IGfVector<Avx2Vec>
 
     public static bool IsSupported => Avx2.IsSupported;
     public static int Unroll4 => 1;
+    public static bool Block8 => false;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Avx2Vec Load(byte* p) => new(Vector256.Load(p));
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Store(byte* p, Avx2Vec v) => v.V.Store(p);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void StoreStream(byte* p, Avx2Vec v) => Avx.StoreAlignedNonTemporal(p, v.V);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Avx2Vec Xor(Avx2Vec a, Avx2Vec b) => new(a.V ^ b.V);
@@ -119,12 +133,16 @@ internal readonly unsafe struct Avx512Vec : IGfVector<Avx512Vec>
 
     public static bool IsSupported => Avx512BW.IsSupported;
     public static int Unroll4 => 1;
+    public static bool Block8 => false;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Avx512Vec Load(byte* p) => new(Vector512.Load(p));
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Store(byte* p, Avx512Vec v) => v.V.Store(p);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void StoreStream(byte* p, Avx512Vec v) => Avx512F.StoreAlignedNonTemporal(p, v.V);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Avx512Vec Xor(Avx512Vec a, Avx512Vec b) => new(a.V ^ b.V);
@@ -157,12 +175,16 @@ internal readonly unsafe struct GfniAvx2Vec : IGfVector<GfniAvx2Vec>
 
     public static bool IsSupported => Gfni.V256.IsSupported;
     public static int Unroll4 => 1;
+    public static bool Block8 => false;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static GfniAvx2Vec Load(byte* p) => new(Vector256.Load(p));
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Store(byte* p, GfniAvx2Vec v) => v.V.Store(p);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void StoreStream(byte* p, GfniAvx2Vec v) => Avx.StoreAlignedNonTemporal(p, v.V);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static GfniAvx2Vec Xor(GfniAvx2Vec a, GfniAvx2Vec b) => new(a.V ^ b.V);
@@ -188,12 +210,16 @@ internal readonly unsafe struct GfniAvx512Vec : IGfVector<GfniAvx512Vec>
 
     public static bool IsSupported => Gfni.V512.IsSupported;
     public static int Unroll4 => 1;
+    public static bool Block8 => true;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static GfniAvx512Vec Load(byte* p) => new(Vector512.Load(p));
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Store(byte* p, GfniAvx512Vec v) => v.V.Store(p);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void StoreStream(byte* p, GfniAvx512Vec v) => Avx512F.StoreAlignedNonTemporal(p, v.V);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static GfniAvx512Vec Xor(GfniAvx512Vec a, GfniAvx512Vec b) => new(a.V ^ b.V);
@@ -219,12 +245,16 @@ internal readonly unsafe struct AdvSimdVec : IGfVector<AdvSimdVec>
 
     public static bool IsSupported => AdvSimd.Arm64.IsSupported;
     public static int Unroll4 => 2;
+    public static bool Block8 => false;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static AdvSimdVec Load(byte* p) => new(Vector128.Load(p));
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Store(byte* p, AdvSimdVec v) => v.V.Store(p);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void StoreStream(byte* p, AdvSimdVec v) => v.V.Store(p);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static AdvSimdVec Xor(AdvSimdVec a, AdvSimdVec b) => new(a.V ^ b.V);

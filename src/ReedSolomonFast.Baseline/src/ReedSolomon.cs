@@ -25,6 +25,7 @@ public sealed unsafe partial class ReedSolomon
     private readonly MulTables?[] _shardTables;
     private readonly MulTables?[] _updateTables;
     private readonly int _maxDegreeOfParallelism;
+    private readonly bool _streamingStores;
     private readonly nuint _parallelThreshold;
 
     /// <summary>Creates a coder with default options.</summary>
@@ -64,6 +65,7 @@ public sealed unsafe partial class ReedSolomon
         _updateTables = new MulTables?[dataShards];
         _maxDegreeOfParallelism = options.MaxDegreeOfParallelism == -1 ? Environment.ProcessorCount : options.MaxDegreeOfParallelism;
         _parallelThreshold = (nuint)options.ParallelThresholdBytes;
+        _streamingStores = options.StreamingStores;
     }
 
     /// <summary>Number of data shards.</summary>
@@ -102,7 +104,7 @@ public sealed unsafe partial class ReedSolomon
         CheckDistinctArrays(shards);
 
         byte** ptrs = stackalloc byte*[TotalShards];
-        var op = new DotOperation(this, null, DataShards, null, ParityShards, _encodeTables, 0, (nuint)len);
+        var op = new DotOperation(this, null, DataShards, null, ParityShards, _encodeTables, 0, (nuint)len) { Stream = _streamingStores };
         Pinner.Run(shards, 0, ptrs, ref op);
     }
 
@@ -117,7 +119,7 @@ public sealed unsafe partial class ReedSolomon
         CheckNoOverlap(data, parity);
 
         byte** ptrs = stackalloc byte*[TotalShards];
-        var op = new DotOperation(this, null, DataShards, null, ParityShards, _encodeTables, 0, (nuint)len);
+        var op = new DotOperation(this, null, DataShards, null, ParityShards, _encodeTables, 0, (nuint)len) { Stream = _streamingStores };
         Pinner.Run(data, default, parity, ptrs, ref op);
     }
 
@@ -145,7 +147,7 @@ public sealed unsafe partial class ReedSolomon
         {
             for (int i = 0; i < DataShards; i++) srcs[i] = d + (nint)i * shardLength;
             for (int i = 0; i < ParityShards; i++) dsts[i] = p + (nint)i * shardLength;
-            Run(srcs, DataShards, dsts, ParityShards, _encodeTables.Pointer, _encodeTables.Pointer + _encodeTables.GfniOffset, (nuint)shardLength);
+            Run(srcs, DataShards, dsts, ParityShards, _encodeTables.Pointer, _encodeTables.Pointer + _encodeTables.GfniOffset, (nuint)shardLength, stream: _streamingStores);
         }
     }
 
@@ -153,7 +155,8 @@ public sealed unsafe partial class ReedSolomon
     /// Adds one data shard's contribution to <paramref name="parity"/>, for building parity
     /// incrementally: zero the parity shards, then call this once for every data index, in any order.
     /// Several shards at once through <see cref="EncodeShards"/> read and write the parity only once
-    /// per batch and run several times faster than one call per shard.
+    /// per batch and run several times faster than one call per shard. The parity buffers must not
+    /// overlap the shard or each other.
     /// </summary>
     public void EncodeShard(int dataIndex, ReadOnlySpan<byte> shard, ReadOnlySpan<Memory<byte>> parity)
     {
@@ -161,6 +164,7 @@ public sealed unsafe partial class ReedSolomon
         ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(dataIndex, DataShards);
         int len = CheckMemories(default, parity, 0, ParityShards);
         if (len != shard.Length) throw new ArgumentException("Shards are different sizes.", nameof(shard));
+        CheckNoOverlap(shard, parity);
         if (len == 0) return;
 
         byte** ptrs = stackalloc byte*[ParityShards];
@@ -181,6 +185,7 @@ public sealed unsafe partial class ReedSolomon
         ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(dataIndex, DataShards);
         CheckStripe(parity.Length, ParityShards, shardLength, nameof(parity));
         if (shard.Length != shardLength) throw new ArgumentException("Shards are different sizes.", nameof(shard));
+        if (shard.Overlaps(parity)) throw new ArgumentException("Parity must not overlap the shard.", nameof(parity));
         if (shardLength == 0) return;
 
         byte** ptrs = stackalloc byte*[ParityShards];
@@ -218,6 +223,7 @@ public sealed unsafe partial class ReedSolomon
     /// Updates parity after some data shards changed, without re-reading the unchanged ones:
     /// parity ^= M * (old ^ new) for each changed shard. <paramref name="oldData"/> and
     /// <paramref name="newData"/> hold one entry per changed index, in the order of <paramref name="changedIndices"/>.
+    /// The parity buffers must not overlap the old or new data, or each other; old and new may be the same buffer.
     /// </summary>
     public void Update(
         ReadOnlySpan<int> changedIndices,
@@ -231,6 +237,8 @@ public sealed unsafe partial class ReedSolomon
         int len = CheckMemories(oldData, parity, oldData.Length, ParityShards);
         foreach (var m in newData)
             if (m.Length != len) throw new ArgumentException("Shards are different sizes.", nameof(newData));
+        CheckNoOverlap(oldData, parity);
+        CheckNoOverlap(newData, parity);
         if (len == 0 || changedIndices.Length == 0) return;
 
         // Bounded by DataShards, so the pointer array and the pin recursion stay within 3 * 256 frames.
@@ -404,7 +412,8 @@ public sealed unsafe partial class ReedSolomon
 
     /// <summary>
     /// Rebuilds every shard whose <paramref name="present"/> flag is false into the memory already at
-    /// that index. Nothing is allocated after the first call for a given erasure pattern.
+    /// that index. Nothing is allocated after the first call for a given erasure pattern. A missing
+    /// shard's buffer must not overlap a shard being read, nor another missing shard's buffer.
     /// </summary>
     /// <exception cref="InsufficientShardsException">Fewer than <see cref="DataShards"/> flags are set.</exception>
     public void Reconstruct(ReadOnlySpan<Memory<byte>> shards, ReadOnlySpan<bool> present) => ReconstructMemories(shards, present, Target.All, default, throwIfInsufficient: true);
@@ -532,6 +541,7 @@ public sealed unsafe partial class ReedSolomon
 
         DecodeSet? set = PlanReconstruction(present, target, required, throwIfInsufficient, out bool ok);
         if (set is null) return ok;
+        CheckNoOverlap(shards, set.Inputs, set.Outputs);
         if (len == 0) return true;
 
         RunDecode(set, shards, (nuint)len);
@@ -776,6 +786,8 @@ public sealed unsafe partial class ReedSolomon
         int[] lengths = new int[Math.Min(shards.Length, DataShards)];
         for (int i = 0; i < lengths.Length; i++) lengths[i] = shards[i].Length;
         CheckJoinInputs(shards.Length, i => lengths[i], outputLength);
+        for (int i = 0; i < lengths.Length; i++)
+            if (destination.Overlaps(shards[i].Span)) throw new ArgumentException($"Destination overlaps shard {i}.", nameof(destination));
 
         int written = 0;
         for (int i = 0; i < DataShards && written < outputLength; i++)
@@ -837,10 +849,13 @@ public sealed unsafe partial class ReedSolomon
     // Buffers
     // ------------------------------------------------------------------------------------------
 
+    /// <summary>Extra bytes between consecutive shards. Measured (experiments 29): 256 beats one line by 10-30% at 64 KiB and 1 MiB; a page is as bad as none.</summary>
+    private const int StridePadding = 256;
+
     /// <summary>
     /// Allocates <paramref name="shardCount"/> shards of <paramref name="shardLength"/> bytes in one
-    /// pinned buffer, each starting on a 64-byte boundary, with consecutive shards offset by one extra
-    /// cache line so that shards a power of two long do not all map to the same cache sets. Alignment
+    /// pinned buffer, each starting on a 64-byte boundary, with consecutive shards offset by 256 extra
+    /// bytes so that shards a power of two long do not all map to the same cache sets. Alignment
     /// is optional for every kernel; the padding is what makes this layout fast.
     /// </summary>
     public static Memory<byte>[] AllocateShards(int shardCount, int shardLength)
@@ -848,7 +863,7 @@ public sealed unsafe partial class ReedSolomon
         ArgumentOutOfRangeException.ThrowIfNegative(shardCount);
         ArgumentOutOfRangeException.ThrowIfNegative(shardLength);
 
-        long strideLong = (((long)shardLength + 63) & ~63L) + 64;
+        long strideLong = (((long)shardLength + 63) & ~63L) + StridePadding;
         long total = shardCount * strideLong + 64;
         if (total > Array.MaxLength) throw new ArgumentOutOfRangeException(nameof(shardLength), "The stripe would exceed the maximum array length.");
         int stride = (int)strideLong;
@@ -936,7 +951,7 @@ public sealed unsafe partial class ReedSolomon
     /// <summary>Shard length up to which a many-output call is split by outputs rather than by byte range.</summary>
     private const int OutputSplitMaxLength = 256 * 1024;
 
-    private void Run(byte** srcs, int srcCount, byte** dsts, int dstCount, byte* shuffle, byte* gfni, nuint len, bool accumulate = false)
+    private void Run(byte** srcs, int srcCount, byte** dsts, int dstCount, byte* shuffle, byte* gfni, nuint len, bool accumulate = false, bool stream = false)
     {
         int workers = _maxDegreeOfParallelism;
 
@@ -962,6 +977,7 @@ public sealed unsafe partial class ReedSolomon
                     Gfni = (nint)gfni,
                     Len = len,
                     Accumulate = accumulate,
+                    Stream = stream,
                     OutputsPerWorker = blocksPerWorker * 4,
                 };
                 Parallel.For(0, outputWorkers, new ParallelOptions { MaxDegreeOfParallelism = outputWorkers }, split.ExecuteOutputs);
@@ -977,7 +993,7 @@ public sealed unsafe partial class ReedSolomon
 
         if (workers <= 1)
         {
-            Internal.Kernel.DotProduct(Kernel, srcs, srcCount, dsts, dstCount, shuffle, gfni, len, accumulate);
+            Internal.Kernel.DotProduct(Kernel, srcs, srcCount, dsts, dstCount, shuffle, gfni, len, accumulate, stream);
             return;
         }
 
@@ -997,6 +1013,7 @@ public sealed unsafe partial class ReedSolomon
             Len = len,
             Chunk = chunk,
             Accumulate = accumulate,
+            Stream = stream,
         };
         Parallel.For(0, workers, new ParallelOptions { MaxDegreeOfParallelism = workers }, job.Execute);
     }
@@ -1013,6 +1030,7 @@ public sealed unsafe partial class ReedSolomon
         public nuint Len;
         public nuint Chunk;
         public bool Accumulate;
+        public bool Stream;
         public int OutputsPerWorker;
 
         /// <summary>Output-block split: worker <paramref name="worker"/> computes its own outputs over the whole length.</summary>
@@ -1023,7 +1041,7 @@ public sealed unsafe partial class ReedSolomon
             int count = Math.Min(OutputsPerWorker, DstCount - d0);
             byte* shuffle = (byte*)Shuffle + (nuint)(d0 * SrcCount) * MulTables.ShuffleEntrySize;
             byte* gfni = (byte*)Gfni + (nuint)(d0 * SrcCount) * MulTables.GfniEntrySize;
-            Internal.Kernel.DotProduct(Tier, (byte**)Srcs, SrcCount, (byte**)Dsts + d0, count, shuffle, gfni, Len, Accumulate);
+            Internal.Kernel.DotProduct(Tier, (byte**)Srcs, SrcCount, (byte**)Dsts + d0, count, shuffle, gfni, Len, Accumulate, Stream);
         }
 
         public void Execute(int worker)
@@ -1036,7 +1054,7 @@ public sealed unsafe partial class ReedSolomon
             byte** dsts = stackalloc byte*[DstCount];
             for (int i = 0; i < SrcCount; i++) srcs[i] = ((byte**)Srcs)[i] + offset;
             for (int i = 0; i < DstCount; i++) dsts[i] = ((byte**)Dsts)[i] + offset;
-            Internal.Kernel.DotProduct(Tier, srcs, SrcCount, dsts, DstCount, (byte*)Shuffle, (byte*)Gfni, n, Accumulate);
+            Internal.Kernel.DotProduct(Tier, srcs, SrcCount, dsts, DstCount, (byte*)Shuffle, (byte*)Gfni, n, Accumulate, Stream);
         }
     }
 
@@ -1127,6 +1145,7 @@ public sealed unsafe partial class ReedSolomon
         public byte* ContiguousDst;
         public nuint ContiguousStride;
         public bool Accumulate;
+        public bool Stream;
 
         public DotOperation(ReedSolomon coder, int* srcIndex, int srcCount, int* dstIndex, int dstCount, MulTables tables, int tableRow, nuint len)
         {
@@ -1154,7 +1173,7 @@ public sealed unsafe partial class ReedSolomon
 
             byte* shuffle = _tables.Pointer + (nuint)(_tableRow * _tables.Cols) * MulTables.ShuffleEntrySize;
             byte* gfni = _tables.Pointer + _tables.GfniOffset + (nuint)(_tableRow * _tables.Cols) * MulTables.GfniEntrySize;
-            _coder.Run(srcs, _srcCount, dsts, DstCount, shuffle, gfni, _len, Accumulate);
+            _coder.Run(srcs, _srcCount, dsts, DstCount, shuffle, gfni, _len, Accumulate, Stream);
             GC.KeepAlive(_tables);
         }
     }
@@ -1315,6 +1334,33 @@ public sealed unsafe partial class ReedSolomon
             for (int j = 0; j < o; j++)
                 if (output.Overlaps(outputs[j].Span))
                     throw new ArgumentException($"Outputs {o} and {j} overlap.", "parity");
+        }
+    }
+
+    private static void CheckNoOverlap(ReadOnlySpan<byte> input, ReadOnlySpan<Memory<byte>> outputs)
+    {
+        for (int o = 0; o < outputs.Length; o++)
+        {
+            ReadOnlySpan<byte> output = outputs[o].Span;
+            if (output.Overlaps(input)) throw new ArgumentException($"Parity {o} overlaps the shard; outputs must not overlap inputs.", "parity");
+            for (int j = 0; j < o; j++)
+                if (output.Overlaps(outputs[j].Span))
+                    throw new ArgumentException($"Parity shards {o} and {j} overlap.", "parity");
+        }
+    }
+
+    /// <summary>Reconstruction into caller buffers: a rebuilt shard must not overlap a shard being read, nor another rebuilt shard.</summary>
+    private static void CheckNoOverlap(ReadOnlySpan<Memory<byte>> shards, int[] inputs, int[] outputs)
+    {
+        for (int o = 0; o < outputs.Length; o++)
+        {
+            ReadOnlySpan<byte> output = shards[outputs[o]].Span;
+            foreach (int i in inputs)
+                if (output.Overlaps(shards[i].Span))
+                    throw new ArgumentException($"Shard {outputs[o]} is missing and overlaps present shard {i}; a rebuilt shard must not overlap one being read.", "shards");
+            for (int j = 0; j < o; j++)
+                if (output.Overlaps(shards[outputs[j]].Span))
+                    throw new ArgumentException($"Missing shards {outputs[o]} and {outputs[j]} overlap.", "shards");
         }
     }
 

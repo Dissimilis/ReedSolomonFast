@@ -17,8 +17,8 @@ benchmarked calls ordinary statically compiled calls.
 
 ## Snapshot provenance
 
-Snapshot of `src/ReedSolomonFast` at commit `6290ac0` ("Split many-output parallel calls by output
-block at L3-resident sizes"), taken 2026-09-07. During an optimization
+Snapshot of `src/ReedSolomonFast` at commit `1a68717` ("Add ReedSolomonStreams: encode, reconstruct
+and verify over streams"), taken 2026-09-10 at the start of the second campaign. During an optimization
 campaign the baseline is moved forward to the last landed commit, so each experiment is measured
 against the code it is trying to improve. Numbers taken before and after a refresh are not comparable.
 

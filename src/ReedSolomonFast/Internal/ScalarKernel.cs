@@ -56,6 +56,13 @@ internal static unsafe class ScalarKernel
         for (; i < len; i++) dst[i] = row[src[i]];
     }
 
+    /// <summary>dst[i] ^= row[a[i] ^ b[i]]: the Update step, one table lookup per byte.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void MulAddDelta(byte* dst, byte* a, byte* b, byte* row, nuint len)
+    {
+        for (nuint i = 0; i < len; i++) dst[i] ^= row[a[i] ^ b[i]];
+    }
+
     /// <summary>dst[i] ^= row[src[i]].</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void MulAdd(byte* dst, byte* src, byte* row, nuint len)
