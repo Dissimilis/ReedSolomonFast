@@ -186,7 +186,7 @@ Mean time per reconstruct:
 
 ![Reed-Solomon encode throughput on .NET](img/benchmark.svg)
 
-The Witteborn package was not run at 1 MiB: it copies every shard through `sbyte[]` on each call, and at 50+20 that is 100 MB of garbage per operation. These rows were measured with the maximum processor state pinned at 99% (turbo off), which keeps this laptop from throttling mid-run; the 1 MiB rows ran warm, and the ratios within a row are what to read. The benchmark project reproduces the table, gates every run on 51 million correctness checks first, and `make_chart.py` generates the chart from the same log.
+The Witteborn package was not run at 1 MiB: it copies every shard through `sbyte[]` on each call, and at 50+20 that is 100 MB of garbage per operation. The ratios within a row are what to read; absolute times depend on the machine's clock policy. The benchmark project reproduces the table, gates every run on 51 million correctness checks first, and `make_chart.py` generates the chart from the same log.
 
 ### Hardware Intrinsics Tiering
 
@@ -204,7 +204,7 @@ Encode throughput per tier from one `--tiers --report` run, 10+4 shards, single 
 | **ARM NEON** | `TBL` nibble tables | not measured here | | |
 | **Scalar** | 64 KiB multiplication table | 0.71 GB/s | 0.74 GB/s | 0.70 GB/s |
 
-This run followed an hour of benchmarking on a throttling laptop, so every tier here is below the 41 GB/s the competitive table shows for the same shape; the ordering is what it measures, and the two GFNI tiers trade places by size.
+This is a separate run from the competitive table, so its absolute numbers differ from it; the ordering of the tiers is what it measures, and the two GFNI tiers trade places by size.
 
 Every vector tier runs the same engine: the byte range in 64 KiB chunks, inputs in balanced groups of at most twelve, and up to four output accumulators per pass over the inputs. GFNI-512 uses eight accumulators when all inputs fit in one group. Chunking and grouping bound the active streams and encourage cache reuse; whether the working set fits in L2 depends on the geometry and CPU.
 
@@ -222,6 +222,8 @@ The same suites on a Hetzner CAX11 (Ampere Altra, Neoverse N1, two shared vCPUs 
 | 50+20 | 64 KiB | 123.00 ms | 2.66 s _(21.6)_ | **4.95 ms _(0.040)_** | 0.9 GB/s |
 
 NEON is 10x the scalar tier and 20 to 30x ReedSolomon.NET on this core. klauspost measures 13 GB/s single-core on a dedicated 2.5 GHz Graviton2, the same Neoverse N1; 9.7 GB/s on a shared 2.0 GHz vCPU is the same class. Reconstruct is within 10% of encode on every row.
+
+The incremental operations apply one field multiply per vector, with the parity as a destination only: `EncodeShard` adds `c * shard` into it, and `Update` adds `c * (old ^ new)` with the XOR taken in registers. On this core that made `EncodeShard` 1.4 to 1.7x and `Update` 2 to 3.7x faster than the general dot product they replaced, on every shape from 5+2 to 50+20 at 64 KiB and 1 MiB.
 
 Two layout rules matter more than any option. First, batch small stripes: coding is independent per byte position, so if you have many 4 KiB stripes to encode, lay them out shard-major (each shard buffer holds the stripes back to back) and encode the whole buffers in one call. One call of sixteen 4 KiB stripes measured 18 to 36% faster than sixteen calls, on the same memory. Second, shard length: shards whose length is a power of two, allocated back to back, land on the same cache sets, and the kernel then fights the cache instead of using it. In the same run, 1 MiB + 1 byte shards encoded 26% faster than 1 MiB shards, at 8 MiB the padded layout from `AllocateShards` was 4x faster than plain arrays, and at 50+20 with 1 MiB shards it was 1.9x faster. Use `AllocateShards`, which spaces consecutive shards 256 bytes apart (a sweep found 256 better than one cache line and a whole page as bad as nothing), or give your shards a length that is not a power of two. And hand the coder whole shards rather than slicing a large payload into 64 KiB or 1 MiB windows: the kernel already walks shards in 64 KiB chunks, and windows measured 10 to 40% slower than one call over the same 16 MiB shards.
 
