@@ -26,6 +26,7 @@ namespace ReedSolomonFast.Benchmarks;
 ///   dotnet run -c Release -- --update-batch   Update across changed-shard counts and layouts, with Encode controls
 ///   dotnet run -c Release -- --paired-update  alternate baseline/current Update on identical buffers in one process
 ///   dotnet run -c Release -- --paired-coding  paired Encode/Reconstruct; optional RSF_PAIRED_SHAPES and RSF_PAIRED_SIZES comma lists
+///   dotnet run -c Release -- --parallel       Encode/Reconstruct over 1..16 workers against XOR and copy bandwidth references
 ///   dotnet run -c Release -- --layout         windowed encoding of a DRAM-sized payload, and shard-base skew
 ///   dotnet run -c Release -- --all            everything
 ///   dotnet run -c Release -- --report         faster job for publishing tables (README numbers)
@@ -88,10 +89,16 @@ public static class Program
             : flags.Contains("--streaming") ? [BenchmarkRunner.Run<StreamingSweepBenchmarks>(config, passthrough), BenchmarkRunner.Run<OutputStreamSweepBenchmarks>(config, passthrough)]
             : flags.Contains("--incremental") ? [BenchmarkRunner.Run<IncrementalBenchmarks>(config, passthrough)]
             : flags.Contains("--update-batch") ? [BenchmarkRunner.Run<UpdateBatchBenchmarks>(config, passthrough)]
+            : flags.Contains("--parallel") ? [BenchmarkRunner.Run<ParallelScalingBenchmarks>(config, passthrough)]
             : flags.Contains("--layout") ? [BenchmarkRunner.Run<WindowBenchmarks>(config, passthrough), BenchmarkRunner.Run<SkewBenchmarks>(config, passthrough)]
             : [BenchmarkRunner.Run<OptimizationBenchmarks>(config, passthrough)];
 
-        foreach (var summary in summaries) PrintAbVerdicts(summary);
+        foreach (var summary in summaries)
+        {
+            PrintAbVerdicts(summary);
+            PrintScalingTable(summary);
+        }
+
         return ReportOutcome(summaries);
     }
 
@@ -154,8 +161,74 @@ public static class Program
         Console.WriteLine();
     }
 
+    private sealed record ScalingRow(string Shape, long Size, int Workers, string Method, double MeanNs);
+
+    /// <summary>
+    /// The --parallel run as the plan reads it: data GB/s per worker count, each worker count
+    /// over one worker, and the coder as a fraction of the XOR reference at the same worker
+    /// count. Absolute GB/s are for this run only; the ratios are the result.
+    /// </summary>
+    private static void PrintScalingTable(Summary summary)
+    {
+        var rows = summary.Reports
+            .Where(r => r.ResultStatistics is not null && r.BenchmarkCase.Descriptor.Type == typeof(ParallelScalingBenchmarks))
+            .Select(r => new ScalingRow(
+                r.BenchmarkCase.Parameters["Shape"]?.ToString() ?? "",
+                Convert.ToInt64(r.BenchmarkCase.Parameters["Shard_Size"]),
+                Convert.ToInt32(r.BenchmarkCase.Parameters["Workers"]),
+                r.BenchmarkCase.Descriptor.WorkloadMethod.Name,
+                r.ResultStatistics!.Mean))
+            .ToList();
+        if (rows.Count == 0) return;
+
+        // The table is read by scripts and across machines; keep the decimal point.
+        var culture = System.Globalization.CultureInfo.CurrentCulture;
+        System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+        try { PrintScalingRows(rows); }
+        finally { System.Globalization.CultureInfo.CurrentCulture = culture; }
+    }
+
+    private static void PrintScalingRows(List<ScalingRow> rows)
+    {
+        int[] workerCounts = rows.Select(r => r.Workers).Distinct().Order().ToArray();
+        string[] methods = ["Encode", "Reconstruct", "XorReference", "CopyReference"];
+
+        Console.WriteLine();
+        Console.WriteLine("Parallel scaling (data GB/s; xN = over one worker; frac = over the XOR reference at the same workers)");
+        Console.WriteLine("----------------------------------------------------------------------------------------------------");
+        Console.Write($"  {"shape",-6} {"size",-8} {"method",-14}");
+        foreach (int w in workerCounts) Console.Write($" {"W=" + w,22}");
+        Console.WriteLine();
+
+        foreach (var group in rows.GroupBy(r => (r.Shape, r.Size)).OrderBy(g => g.Key.Shape).ThenBy(g => g.Key.Size))
+        {
+            long dataBytes = Geometry.Parse(group.Key.Shape).Data * group.Key.Size;
+            string size = group.Key.Size >= 1 << 20 ? $"{group.Key.Size >> 20} MiB" : $"{group.Key.Size >> 10} KiB";
+            var xor = group.Where(r => r.Method == "XorReference").ToDictionary(r => r.Workers, r => dataBytes / r.MeanNs);
+            foreach (string method in methods)
+            {
+                var byWorkers = group.Where(r => r.Method == method).ToDictionary(r => r.Workers, r => dataBytes / r.MeanNs);
+                if (byWorkers.Count == 0) continue;
+                Console.Write($"  {group.Key.Shape,-6} {size,-8} {method,-14}");
+                foreach (int w in workerCounts)
+                {
+                    if (!byWorkers.TryGetValue(w, out double gbps)) { Console.Write($" {"-",22}"); continue; }
+                    string scale = byWorkers.TryGetValue(workerCounts[0], out double one) ? $"x{gbps / one:F2}" : "";
+                    string frac = method is "Encode" or "Reconstruct" && xor.TryGetValue(w, out double ceiling) ? $" {gbps / ceiling:F2}" : "";
+                    Console.Write($" {$"{gbps,6:F1} {scale}{frac}",22}");
+                }
+
+                Console.WriteLine();
+            }
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("  Read the ratios inside this run only. Run-to-run spread between two sweeps is the noise bound.");
+        Console.WriteLine();
+    }
+
     private static bool IsOurFlag(string arg) =>
-        new[] { "--competitive", "--tiers", "--dispatch", "--tails", "--batch", "--api", "--fixed", "--layout", "--incremental", "--update-batch", "--paired-update", "--paired-coding", "--streaming", "--all", "--quick", "--report" }
+        new[] { "--competitive", "--tiers", "--dispatch", "--tails", "--batch", "--api", "--fixed", "--layout", "--incremental", "--update-batch", "--paired-update", "--paired-coding", "--parallel", "--streaming", "--all", "--quick", "--report" }
             .Any(f => arg.Equals(f, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>A benchmark run that silently failed but exited 0 looks like a clean result. Surface it.</summary>
