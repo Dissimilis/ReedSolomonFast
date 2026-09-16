@@ -23,6 +23,9 @@ namespace ReedSolomonFast.Benchmarks;
 ///   dotnet run -c Release -- --fixed          fixed cost of a small call: checks, pin, kernel
 ///   dotnet run -c Release -- --streaming      streaming stores against stripe footprint and output count
 ///   dotnet run -c Release -- --incremental    EncodeShard, EncodeShards and Update per layout
+///   dotnet run -c Release -- --update-batch   Update across changed-shard counts and layouts, with Encode controls
+///   dotnet run -c Release -- --paired-update  alternate baseline/current Update on identical buffers in one process
+///   dotnet run -c Release -- --paired-coding  paired Encode/Reconstruct; optional RSF_PAIRED_SHAPES and RSF_PAIRED_SIZES comma lists
 ///   dotnet run -c Release -- --layout         windowed encoding of a DRAM-sized payload, and shard-base skew
 ///   dotnet run -c Release -- --all            everything
 ///   dotnet run -c Release -- --report         faster job for publishing tables (README numbers)
@@ -67,6 +70,8 @@ public static class Program
         }
 
         Console.WriteLine();
+        if (flags.Contains("--paired-update")) return PairedUpdateBenchmarks.Run();
+        if (flags.Contains("--paired-coding")) return PairedCodingBenchmarks.Run();
         var config = BuildConfig(quick, report);
 
         Summary[] summaries = flags.Contains("--all")
@@ -82,6 +87,7 @@ public static class Program
             : flags.Contains("--fixed") ? [BenchmarkRunner.Run<FixedCostBenchmarks>(config, passthrough)]
             : flags.Contains("--streaming") ? [BenchmarkRunner.Run<StreamingSweepBenchmarks>(config, passthrough), BenchmarkRunner.Run<OutputStreamSweepBenchmarks>(config, passthrough)]
             : flags.Contains("--incremental") ? [BenchmarkRunner.Run<IncrementalBenchmarks>(config, passthrough)]
+            : flags.Contains("--update-batch") ? [BenchmarkRunner.Run<UpdateBatchBenchmarks>(config, passthrough)]
             : flags.Contains("--layout") ? [BenchmarkRunner.Run<WindowBenchmarks>(config, passthrough), BenchmarkRunner.Run<SkewBenchmarks>(config, passthrough)]
             : [BenchmarkRunner.Run<OptimizationBenchmarks>(config, passthrough)];
 
@@ -103,11 +109,13 @@ public static class Program
                 Report = r,
                 Shape = r.BenchmarkCase.Parameters.Items.FirstOrDefault(p => p.Name == "Shape")?.Value?.ToString(),
                 Size = r.BenchmarkCase.Parameters.Items.FirstOrDefault(p => p.Name == "Shard_Size")?.Value,
+                Extra = string.Join(", ", r.BenchmarkCase.Parameters.Items.Where(p => p.Name != "Shape" && p.Name != "Shard_Size").Select(p => $"{p.Name}={p.Value}")),
                 Method = r.BenchmarkCase.Descriptor.WorkloadMethod.Name,
             })
             .Where(x => x.Size is not null && (x.Method.StartsWith("Before", StringComparison.Ordinal) || x.Method.StartsWith("After", StringComparison.Ordinal)))
             .GroupBy(x => (
                 x.Shape,
+                x.Extra,
                 Size: Convert.ToInt64(x.Size),
                 Variant: x.Method.StartsWith("Before", StringComparison.Ordinal) ? x.Method["Before".Length..] : x.Method["After".Length..]))
             .Where(g => g.Count() == 2)
@@ -136,7 +144,7 @@ public static class Program
                 : changePercent < 0 ? $"IMPROVED {-changePercent:F1}%"
                 : $"REGRESSED {changePercent:F1}%";
 
-            Console.WriteLine($"  {pair.Key.Variant,-12} {pair.Key.Shape,-6} {pair.Key.Size,10:N0} B  ratio {ratio:F3}  {verdict}");
+            Console.WriteLine($"  {pair.Key.Variant,-12} {pair.Key.Shape,-6} {pair.Key.Size,10:N0} B  {pair.Key.Extra}  ratio {ratio:F3}  {verdict}");
         }
 
         Console.WriteLine();
@@ -147,7 +155,7 @@ public static class Program
     }
 
     private static bool IsOurFlag(string arg) =>
-        new[] { "--competitive", "--tiers", "--dispatch", "--tails", "--batch", "--api", "--fixed", "--layout", "--incremental", "--streaming", "--all", "--quick", "--report" }
+        new[] { "--competitive", "--tiers", "--dispatch", "--tails", "--batch", "--api", "--fixed", "--layout", "--incremental", "--update-batch", "--paired-update", "--paired-coding", "--streaming", "--all", "--quick", "--report" }
             .Any(f => arg.Equals(f, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>A benchmark run that silently failed but exited 0 looks like a clean result. Surface it.</summary>

@@ -1,8 +1,9 @@
 """Generate a throughput chart (SVG) from a BenchmarkDotNet competitive log.
 
 No dependencies. Emits a light-background SVG that stays readable in GitHub's dark theme.
-Usage: python make_chart.py <bdn-log> <out.svg> [Shape]   (default Shape 10+4)
+Usage: python make_chart.py <bdn-log> <out.svg> [Shape] [CPU label]   (default Shape 10+4)
 """
+import html
 import math
 import re
 import sys
@@ -37,6 +38,7 @@ def parse(path, shape):
 
 def main():
     shape = sys.argv[3] if len(sys.argv) > 3 else "10+4"
+    cpu = html.escape(sys.argv[4] if len(sys.argv) > 4 else "AMD Ryzen 7 PRO 7840U")
     data_shards, parity_shards = (int(x) for x in shape.split("+"))
     total = data_shards + parity_shards
     rows = parse(sys.argv[1], shape)
@@ -71,7 +73,7 @@ def main():
         f'<text x="{L}" y="26" font-size="17" font-weight="600" fill="#1b1b1b">'
         f'Reed-Solomon encode throughput on .NET, {shape} shards. Higher is better</text>',
         f'<text x="{L}" y="45" font-size="12" fill="#5a5a5a">'
-        f'Single thread, AMD Ryzen 7 PRO 7840U, .NET 10. Data + parity bytes per second, log scale.</text>',
+        f'Single thread, {cpu}, .NET 10. Data + parity bytes per second, log scale.</text>',
     ]
 
     ticks = []
@@ -125,8 +127,10 @@ def main():
         ly += 21
     out.append("</svg>")
 
-    open(sys.argv[2], "w", encoding="utf-8").write("\n".join(out))
+    with open(sys.argv[2], "w", encoding="utf-8", newline="\n") as output:
+        output.write("\n".join(out) + "\n")
     print(f"wrote {sys.argv[2]}: {len(data)} series, {len(sizes)} sizes, peak {max(all_tp):.2f} GB/s")
 
 
-main()
+if __name__ == "__main__":
+    main()

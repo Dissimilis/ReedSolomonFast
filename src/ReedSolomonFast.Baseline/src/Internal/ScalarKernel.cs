@@ -56,6 +56,26 @@ internal static unsafe class ScalarKernel
         for (; i < len; i++) dst[i] = row[src[i]];
     }
 
+    /// <summary>dst[i] ^= row[a[i] ^ b[i]]: the Update step, one table lookup per byte.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void MulAddDelta(byte* dst, byte* a, byte* b, byte* row, nuint len)
+    {
+        for (nuint i = 0; i < len; i++) dst[i] ^= row[a[i] ^ b[i]];
+    }
+
+    /// <summary>Accumulates old/new pairs using one parity load and store per byte; also handles vector tails.</summary>
+    public static void AccumulateDeltaBatch(byte* dst, byte** sources, int count, byte* tables, nuint offset, nuint len)
+    {
+        byte** rows = stackalloc byte*[count];
+        for (int s = 0; s < count; s++) rows[s] = Gf256.MulPointer + (tables[s * MulTables.ShuffleEntrySize + 1] << 8);
+        for (nuint i = offset; i < offset + len; i++)
+        {
+            byte value = dst[i];
+            for (int s = 0; s < count; s++) value ^= rows[s][sources[2 * s][i] ^ sources[2 * s + 1][i]];
+            dst[i] = value;
+        }
+    }
+
     /// <summary>dst[i] ^= row[src[i]].</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void MulAdd(byte* dst, byte* src, byte* row, nuint len)

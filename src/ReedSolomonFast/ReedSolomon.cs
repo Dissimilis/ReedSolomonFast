@@ -951,8 +951,8 @@ public sealed unsafe partial class ReedSolomon
     /// <summary>Shard length up to which a many-output call is split by outputs rather than by byte range.</summary>
     private const int OutputSplitMaxLength = 256 * 1024;
 
-    // delta: the Update step, dsts[0] ^= c * (srcs[0] ^ srcs[1]), with the tables pointing at c;
-    // it takes the byte-range parallel path like any other call.
+    // delta: Update over interleaved old/new pairs, with one coefficient per pair. It takes
+    // the byte-range parallel path; the single-pair specialization keeps its existing loop.
     private void Run(byte** srcs, int srcCount, byte** dsts, int dstCount, byte* shuffle, byte* gfni, nuint len, bool accumulate = false, bool stream = false, bool delta = false)
     {
         int workers = _maxDegreeOfParallelism;
@@ -995,7 +995,8 @@ public sealed unsafe partial class ReedSolomon
 
         if (workers <= 1)
         {
-            if (delta) Internal.Kernel.AccumulateDelta(Kernel, dsts[0], srcs[0], srcs[1], shuffle, gfni, len);
+            if (delta && srcCount > 2) Internal.Kernel.AccumulateDeltaBatch(Kernel, dsts[0], srcs, srcCount / 2, shuffle, gfni, len);
+            else if (delta) Internal.Kernel.AccumulateDelta(Kernel, dsts[0], srcs[0], srcs[1], shuffle, gfni, len);
             else Internal.Kernel.DotProduct(Kernel, srcs, srcCount, dsts, dstCount, shuffle, gfni, len, accumulate, stream);
             return;
         }
@@ -1059,7 +1060,8 @@ public sealed unsafe partial class ReedSolomon
             byte** dsts = stackalloc byte*[DstCount];
             for (int i = 0; i < SrcCount; i++) srcs[i] = ((byte**)Srcs)[i] + offset;
             for (int i = 0; i < DstCount; i++) dsts[i] = ((byte**)Dsts)[i] + offset;
-            if (Delta) Internal.Kernel.AccumulateDelta(Tier, dsts[0], srcs[0], srcs[1], (byte*)Shuffle, (byte*)Gfni, n);
+            if (Delta && SrcCount > 2) Internal.Kernel.AccumulateDeltaBatch(Tier, dsts[0], srcs, SrcCount / 2, (byte*)Shuffle, (byte*)Gfni, n);
+            else if (Delta) Internal.Kernel.AccumulateDelta(Tier, dsts[0], srcs[0], srcs[1], (byte*)Shuffle, (byte*)Gfni, n);
             else Internal.Kernel.DotProduct(Tier, srcs, SrcCount, dsts, DstCount, (byte*)Shuffle, (byte*)Gfni, n, Accumulate, Stream);
         }
     }
@@ -1188,8 +1190,7 @@ public sealed unsafe partial class ReedSolomon
     }
 
     /// <summary>
-    /// Update over pinned old, new and parity memories: for each changed index, one in-place kernel
-    /// call per parity shard with rows [1, c, c]. Pins everything once instead of once per index.
+    /// Updates pinned parity from old/new pairs, batching changed shards on the measured GFNI-512 path.
     /// </summary>
     private struct UpdateOperation : IPinnedOperation
     {
@@ -1208,6 +1209,14 @@ public sealed unsafe partial class ReedSolomon
 
         public void Execute(byte** ptrs)
         {
+            // The Fedora campaign measures this tier at 64 KiB and above. Keep small shards and
+            // other tiers on their existing path until batching has measurements there too.
+            if (_count > 1 && _len >= 65_536 && _coder.Kernel == KernelTier.GfniAvx512)
+            {
+                ExecuteBatches(ptrs);
+                return;
+            }
+
             for (int i = 0; i < _count; i++)
             {
                 var op = new AccumulateOperation(_coder, null, _coder.UpdateTables(_indices[i]), 3, _len)
@@ -1218,6 +1227,43 @@ public sealed unsafe partial class ReedSolomon
                 };
                 op.Execute(ptrs);
             }
+        }
+
+        private void ExecuteBatches(byte** ptrs)
+        {
+            // Four changes keep the live streams bounded to eight inputs and one parity output.
+            const int batchSize = 4;
+            byte** sources = stackalloc byte*[2 * batchSize];
+            byte** destination = stackalloc byte*[1];
+            byte* shuffle = stackalloc byte[batchSize * MulTables.ShuffleEntrySize];
+            byte* gfni = stackalloc byte[batchSize * MulTables.GfniEntrySize];
+            MulTables tables = _coder._encodeTables;
+            for (int start = 0; start < _count; start += batchSize)
+            {
+                int count = Math.Min(batchSize, _count - start);
+                for (int i = 0; i < count; i++)
+                {
+                    sources[2 * i] = ptrs[start + i];
+                    sources[2 * i + 1] = ptrs[_count + start + i];
+                }
+
+                for (int p = 0; p < _coder.ParityShards; p++)
+                {
+                    for (int i = 0; i < count; i++)
+                    {
+                        int entry = p * _coder.DataShards + _indices[start + i];
+                        Buffer.MemoryCopy(tables.Pointer + entry * MulTables.ShuffleEntrySize,
+                            shuffle + i * MulTables.ShuffleEntrySize, MulTables.ShuffleEntrySize, MulTables.ShuffleEntrySize);
+                        Buffer.MemoryCopy(tables.Pointer + tables.GfniOffset + entry * MulTables.GfniEntrySize,
+                            gfni + i * MulTables.GfniEntrySize, MulTables.GfniEntrySize, MulTables.GfniEntrySize);
+                    }
+
+                    destination[0] = ptrs[2 * _count + p];
+                    _coder.Run(sources, 2 * count, destination, 1, shuffle, gfni, _len, accumulate: true, delta: true);
+                }
+            }
+
+            GC.KeepAlive(tables);
         }
     }
 

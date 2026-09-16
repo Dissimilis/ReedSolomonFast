@@ -6,6 +6,13 @@ namespace ReedSolomonFast.Internal;
 /// </summary>
 internal static class KernelTuning
 {
+    // Initialize ARM's multi-group setting only when that path is used. The generic vector
+    // kernel's existing initialization and the explicit override stay unchanged on x86.
+    internal static class Arm
+    {
+        internal static readonly int MultiGroupChunkBytes = Read("REEDSOLOMONFAST_CHUNK", 16 * 1024, 128, 1 << 30) & ~127;
+    }
+
     public static int Read(string name, int defaultValue, int min, int max)
     {
         string? text = Environment.GetEnvironmentVariable(name);

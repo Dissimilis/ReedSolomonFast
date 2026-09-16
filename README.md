@@ -27,7 +27,7 @@ Erasure coding turns N data shards into N + M shards such that any N of them reb
 
 [ReedSolomon.NET](https://github.com/egbakou/reedsolomon) by Laurent Egbakou and [ReedSolomon](https://github.com/Witteborn/ReedSolomon) by Witteborn are both ports of Backblaze's JavaReedSolomon. Their matrix construction and the shard layout here follow the same Backblaze design, and parity produced by either of them verifies with this library and the other way round.
 
-The versions benchmarked below multiply one byte at a time through lookup tables. ReedSolomonFast uses SIMD field arithmetic with the kernel structure from Intel ISA-L. The encode table below measures about 40x to 110x the throughput of ReedSolomon.NET and 1,400x to 3,000x that of Witteborn's package on the same machine, single-threaded. See the numbers below.
+The versions benchmarked below multiply one byte at a time through lookup tables. ReedSolomonFast uses SIMD field arithmetic with the kernel structure from Intel ISA-L. The encode table below measures about 55x to 121x the throughput of ReedSolomon.NET and 1,366x to 2,778x that of Witteborn's package on the same machine, single-threaded. See the numbers below.
 
 Reed-Solomon repairs missing shards, not corrupted ones. `Verify` tells you whether parity matches data, but it cannot say which shard is wrong; keep a hash per shard if you need that.
 
@@ -144,55 +144,61 @@ bool ok = await ReedSolomonStreams.VerifyAsync(rs, OpenShards(), shardLength);  
 
 Encode and reconstruct against [ReedSolomon.NET](https://www.nuget.org/packages/ReedSolomon.NET) and [ReedSolomon](https://www.nuget.org/packages/ReedSolomon) (Witteborn). Every row is single-threaded; reconstruct rebuilds as many data shards as there are parity shards, the worst case. Throughput counts data plus parity bytes per operation, the convention klauspost uses.
 
+This run used Fedora on September 14, 2026, pinned to one logical CPU with boost and tiered compilation disabled. The short report jobs compare implementations; separate paired A/B runs assess optimizations. The [campaign report](docs/benchmarks/odroid-arm-20260914.md) links the source logs.
+
 ```
-BenchmarkDotNet v0.15.8, Windows 11 (10.0.26200)
-AMD Ryzen 7 PRO 7840U w/ Radeon 780M Graphics, 1 CPU, 16 logical and 8 physical cores
-.NET SDK 10.0.303, .NET 10.0.11, X64 RyuJIT AVX-512, kernel GfniAvx512
+BenchmarkDotNet v0.15.8, Linux Fedora Linux 44 (Workstation Edition)
+AMD Ryzen 7 8845HS w/ Radeon 780M Graphics 1.09GHz, 1 CPU, 16 logical and 8 physical cores
+.NET SDK 10.0.111
+  [Host] : .NET 10.0.11 (10.0.11, 10.0.1126.37416), X64 RyuJIT x86-64-v4
+  Report : .NET 10.0.11 (10.0.11, 10.0.1126.37416), X64 RyuJIT x86-64-v4
 ```
 
 Mean time per encode, and the ratio against ReedSolomon.NET (lower is better):
 
 | Shards | Shard size | ReedSolomon.NET | ReedSolomon (Witteborn) | **ReedSolomonFast** | Throughput |
 |---|---:|---:|---:|---:|---:|
-| 5+2 | 4 KiB | 38.4 us | 1.11 ms _(29.0)_ | **550 ns _(0.014)_** | 52.1 GB/s |
-| 5+2 | 64 KiB | 597.7 us | 17.65 ms _(29.5)_ | **12.5 us _(0.021)_** | 36.8 GB/s |
-| 5+2 | 1 MiB | 9.75 ms | not run | **166.5 us _(0.017)_** | 44.1 GB/s |
-| 10+4 | 4 KiB | 143.3 us | 4.29 ms _(29.9)_ | **1.7 us _(0.012)_** | 34.0 GB/s |
-| 10+4 | 64 KiB | 2.39 ms | 63.11 ms _(26.4)_ | **22.2 us _(0.009)_** | 41.4 GB/s |
-| 10+4 | 1 MiB | 37.59 ms | not run | **901.4 us _(0.024)_** | 16.3 GB/s |
-| 8+8 | 4 KiB | 239.0 us | 6.42 ms _(26.9)_ | **2.5 us _(0.010)_** | 26.1 GB/s |
-| 8+8 | 64 KiB | 3.79 ms | 101.25 ms _(26.7)_ | **34.5 us _(0.009)_** | 30.4 GB/s |
-| 8+8 | 1 MiB | 66.11 ms | not run | **1.05 ms _(0.016)_** | 16.0 GB/s |
-| 50+20 | 4 KiB | 3.76 ms | 92.33 ms _(24.5)_ | **41.5 us _(0.011)_** | 6.9 GB/s |
-| 50+20 | 64 KiB | 66.29 ms | 1.53 s _(23.1)_ | **734.3 us _(0.011)_** | 6.2 GB/s |
-| 50+20 | 1 MiB | 1.09 s | not run | **23.91 ms _(0.022)_** | 3.1 GB/s |
+| 5+2 | 4 KiB | 33.6 us | 834.6 us _(24.8)_ | **611.2 ns _(0.018)_** | 46.9 GB/s |
+| 5+2 | 64 KiB | 538.5 us | 13.74 ms _(25.5)_ | **7.1 us _(0.013)_** | 64.7 GB/s |
+| 5+2 | 1 MiB | 8.64 ms | not run | **93.8 us _(0.011)_** | 78.2 GB/s |
+| 10+4 | 4 KiB | 135.4 us | 3.15 ms _(23.3)_ | **1.5 us _(0.011)_** | 37.7 GB/s |
+| 10+4 | 64 KiB | 2.17 ms | 50.05 ms _(23.1)_ | **18.1 us _(0.008)_** | 50.7 GB/s |
+| 10+4 | 1 MiB | 34.67 ms | not run | **306.3 us _(0.009)_** | 47.9 GB/s |
+| 8+8 | 4 KiB | 216.5 us | 4.89 ms _(22.6)_ | **2.5 us _(0.012)_** | 25.8 GB/s |
+| 8+8 | 64 KiB | 3.47 ms | 79.82 ms _(23.0)_ | **28.7 us _(0.008)_** | 36.5 GB/s |
+| 8+8 | 1 MiB | 55.41 ms | not run | **459.9 us _(0.008)_** | 36.5 GB/s |
+| 50+20 | 4 KiB | 3.41 ms | 74.68 ms _(21.9)_ | **32.4 us _(0.010)_** | 8.9 GB/s |
+| 50+20 | 64 KiB | 54.67 ms | 1.15 s _(21.0)_ | **471.6 us _(0.009)_** | 9.7 GB/s |
+| 50+20 | 1 MiB | 871.41 ms | not run | **8.58 ms _(0.010)_** | 8.6 GB/s |
 
 Mean time per reconstruct:
 
 | Shards | Shard size | ReedSolomon.NET | ReedSolomon (Witteborn) | **ReedSolomonFast** | Throughput |
 |---|---:|---:|---:|---:|---:|
-| 5+2 | 4 KiB | 40.7 us | 1.14 ms _(28.1)_ | **471 ns _(0.012)_** | 60.8 GB/s |
-| 5+2 | 64 KiB | 1.18 ms | 17.58 ms _(14.9)_ | **5.7 us _(0.005)_** | 80.7 GB/s |
-| 5+2 | 1 MiB | 18.79 ms | not run | **168.7 us _(0.009)_** | 43.5 GB/s |
-| 10+4 | 4 KiB | 224.1 us | 3.89 ms _(17.4)_ | **1.6 us _(0.007)_** | 35.5 GB/s |
-| 10+4 | 64 KiB | 4.62 ms | 66.56 ms _(14.4)_ | **21.6 us _(0.005)_** | 42.5 GB/s |
-| 10+4 | 1 MiB | 81.29 ms | not run | **995.9 us _(0.012)_** | 14.7 GB/s |
-| 8+8 | 4 KiB | 369.2 us | 7.07 ms _(19.1)_ | **2.3 us _(0.006)_** | 28.4 GB/s |
-| 8+8 | 64 KiB | 7.74 ms | 114.73 ms _(14.8)_ | **38.7 us _(0.005)_** | 27.1 GB/s |
-| 8+8 | 1 MiB | 116.48 ms | not run | **1.60 ms _(0.014)_** | 10.5 GB/s |
-| 50+20 | 4 KiB | 5.25 ms | 94.28 ms _(17.9)_ | **38.0 us _(0.007)_** | 7.5 GB/s |
-| 50+20 | 64 KiB | 80.54 ms | 1.58 s _(19.7)_ | **723.8 us _(0.009)_** | 6.3 GB/s |
-| 50+20 | 1 MiB | 1.66 s | not run | **23.66 ms _(0.014)_** | 3.1 GB/s |
+| 5+2 | 4 KiB | 33.7 us | 830.9 us _(24.7)_ | **421.5 ns _(0.013)_** | 68.0 GB/s |
+| 5+2 | 64 KiB | 533.6 us | 13.15 ms _(24.6)_ | **4.7 us _(0.009)_** | 97.6 GB/s |
+| 5+2 | 1 MiB | 8.62 ms | not run | **84.3 us _(0.010)_** | 87.1 GB/s |
+| 10+4 | 4 KiB | 133.9 us | 3.00 ms _(22.4)_ | **1.5 us _(0.011)_** | 38.0 GB/s |
+| 10+4 | 64 KiB | 2.15 ms | 46.94 ms _(21.8)_ | **17.6 us _(0.008)_** | 52.3 GB/s |
+| 10+4 | 1 MiB | 34.67 ms | not run | **305.7 us _(0.009)_** | 48.0 GB/s |
+| 8+8 | 4 KiB | 219.2 us | 4.71 ms _(21.5)_ | **1.9 us _(0.009)_** | 33.7 GB/s |
+| 8+8 | 64 KiB | 3.47 ms | 75.63 ms _(21.8)_ | **27.8 us _(0.008)_** | 37.7 GB/s |
+| 8+8 | 1 MiB | 55.43 ms | not run | **453.9 us _(0.008)_** | 37.0 GB/s |
+| 50+20 | 4 KiB | 3.43 ms | 69.98 ms _(20.4)_ | **31.1 us _(0.009)_** | 9.2 GB/s |
+| 50+20 | 64 KiB | 53.90 ms | 1.11 s _(20.7)_ | **499.7 us _(0.009)_** | 9.2 GB/s |
+| 50+20 | 1 MiB | 876.50 ms | not run | **8.41 ms _(0.010)_** | 8.7 GB/s |
 
 ![Reed-Solomon encode throughput on .NET](img/benchmark.svg)
 
 The Witteborn package was not run at 1 MiB: it copies every shard through `sbyte[]` on each call, and at 50+20 that is 100 MB of garbage per operation. The ratios within a row are what to read; absolute times depend on the machine's clock policy. The benchmark project reproduces the table, gates every run on 51 million correctness checks first, and `make_chart.py` generates the chart from the same log.
 
+`Update` batches up to four changed shards per parity pass on GFNI-512 for shards of at least 64 KiB. In two paired runs on this Fedora host, updating four shards took 17–28% less time at 10+4 and 34–49% less time at 50+20, across 64 KiB and 1 MiB shards on ordinary and padded buffers. Encode and single-change Update controls stayed within 1.7%; the measured noise bound was about 2%. Smaller shards and other tiers retain their existing path.
+
 ### Hardware Intrinsics Tiering
 
 The best tier the CPU supports is selected at construction; `ReedSolomonOptions.Kernel` or the `REEDSOLOMONFAST_KERNEL` environment variable pins one.
 
-Encode throughput per tier from one `--tiers --report` run, 10+4 shards, single thread (data plus parity bytes per second):
+Encode throughput per tier from the earlier Windows 11 run on a Ryzen 7 PRO 7840U, using `--tiers --report`: 10+4 shards, single thread (data plus parity bytes per second). These are separate measurements from the Fedora table above:
 
 | Tier | Instructions | 4 KiB shards | 64 KiB shards | 1 MiB shards |
 |------|-------------|---:|---:|---:|
@@ -206,9 +212,11 @@ Encode throughput per tier from one `--tiers --report` run, 10+4 shards, single 
 
 This is a separate run from the competitive table, so its absolute numbers differ from it; the ordering of the tiers is what it measures, and the two GFNI tiers trade places by size.
 
-Every vector tier runs the same engine: the byte range in 64 KiB chunks, inputs in balanced groups of at most twelve, and up to four output accumulators per pass over the inputs. GFNI-512 uses eight accumulators when all inputs fit in one group. Chunking and grouping bound the active streams and encourage cache reuse; whether the working set fits in L2 depends on the geometry and CPU.
+Every vector tier runs the same engine: the byte range in 64 KiB chunks (16 KiB for NEON calls with multiple input groups), inputs in balanced groups of at most twelve, and up to four output accumulators per pass over the inputs. GFNI-512 uses eight accumulators when all inputs fit in one group. Chunking and grouping bound the active streams and encourage cache reuse; whether the working set fits in L2 depends on the geometry and CPU.
 
 ### ARM64
+
+On the ODROID C2 (Cortex-A53), 16 KiB internal chunks for multi-group NEON calls reduce 50+20 Encode/Reconstruct time by roughly 27–34% at 64/256 KiB, on ordinary and padded buffers. On the N2+ (Cortex-A73), 50+20 Encode with ordinary 1 MiB arrays improves about 6%; other cases are less consistent. These are pinned, single-threaded paired comparisons against the previous 64 KiB default. See the [ODROID campaign report](docs/benchmarks/odroid-arm-20260914.md) for controls, limitations and rejected experiments.
 
 The same suites on a Hetzner CAX11 (Ampere Altra, Neoverse N1, two shared vCPUs at 2.0 GHz, Ubuntu 24.04, .NET 10.0.11), single thread, NEON tier. Encode, mean time and ratio against ReedSolomon.NET:
 
@@ -225,7 +233,7 @@ NEON is 10x the scalar tier and 20 to 30x ReedSolomon.NET on this core. klauspos
 
 The incremental operations apply one field multiply per vector, with the parity as a destination only: `EncodeShard` adds `c * shard` into it, and `Update` adds `c * (old ^ new)` with the XOR taken in registers. On this core that made `EncodeShard` 1.4 to 1.7x and `Update` 2 to 3.7x faster than the general dot product they replaced, on every shape from 5+2 to 50+20 at 64 KiB and 1 MiB.
 
-Two layout rules matter more than any option. First, batch small stripes: coding is independent per byte position, so if you have many 4 KiB stripes to encode, lay them out shard-major (each shard buffer holds the stripes back to back) and encode the whole buffers in one call. One call of sixteen 4 KiB stripes measured 18 to 36% faster than sixteen calls, on the same memory. Second, shard length: shards whose length is a power of two, allocated back to back, land on the same cache sets, and the kernel then fights the cache instead of using it. In the same run, 1 MiB + 1 byte shards encoded 26% faster than 1 MiB shards, at 8 MiB the padded layout from `AllocateShards` was 4x faster than plain arrays, and at 50+20 with 1 MiB shards it was 1.9x faster. Use `AllocateShards`, which spaces consecutive shards 256 bytes apart (a sweep found 256 better than one cache line and a whole page as bad as nothing), or give your shards a length that is not a power of two. And hand the coder whole shards rather than slicing a large payload into 64 KiB or 1 MiB windows: the kernel already walks shards in 64 KiB chunks, and windows measured 10 to 40% slower than one call over the same 16 MiB shards.
+Two layout rules matter more than any option. First, batch small stripes: coding is independent per byte position, so if you have many 4 KiB stripes to encode, lay them out shard-major (each shard buffer holds the stripes back to back) and encode the whole buffers in one call. One call of sixteen 4 KiB stripes measured 18 to 36% faster than sixteen calls, on the same memory. Second, shard length: shards whose length is a power of two, allocated back to back, land on the same cache sets, and the kernel then fights the cache instead of using it. In the same run, 1 MiB + 1 byte shards encoded 26% faster than 1 MiB shards, at 8 MiB the padded layout from `AllocateShards` was 4x faster than plain arrays, and at 50+20 with 1 MiB shards it was 1.9x faster. Use `AllocateShards`, which spaces consecutive shards 256 bytes apart (a sweep found 256 better than one cache line and a whole page as bad as nothing), or give your shards a length that is not a power of two. And hand the coder whole shards rather than slicing a large payload into 64 KiB or 1 MiB windows: the kernel already walks shards in internal chunks, and windows measured 10 to 40% slower than one call over the same 16 MiB shards.
 
 ## Building from Source
 

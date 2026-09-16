@@ -150,6 +150,36 @@ internal static unsafe class Kernel
         }
     }
 
+    /// <summary>Accumulates interleaved old/new pairs using one coefficient entry per pair.</summary>
+    public static void AccumulateDeltaBatch(KernelTier tier, byte* dst, byte** sources, int count, byte* tables, byte* gfni, nuint len)
+    {
+        if (len == 0) return;
+        switch (tier)
+        {
+            case KernelTier.GfniAvx512:
+                VectorKernel<GfniAvx512Vec>.AccumulateDeltaBatch(dst, sources, count, tables, gfni, len);
+                break;
+            case KernelTier.GfniAvx2:
+                VectorKernel<GfniAvx2Vec>.AccumulateDeltaBatch(dst, sources, count, tables, gfni, len);
+                break;
+            case KernelTier.Avx512:
+                VectorKernel<Avx512Vec>.AccumulateDeltaBatch(dst, sources, count, tables, gfni, len);
+                break;
+            case KernelTier.Avx2:
+                VectorKernel<Avx2Vec>.AccumulateDeltaBatch(dst, sources, count, tables, gfni, len);
+                break;
+            case KernelTier.Ssse3:
+                VectorKernel<Ssse3Vec>.AccumulateDeltaBatch(dst, sources, count, tables, gfni, len);
+                break;
+            case KernelTier.AdvSimd:
+                VectorKernel<AdvSimdVec>.AccumulateDeltaBatch(dst, sources, count, tables, gfni, len);
+                break;
+            default:
+                ScalarKernel.AccumulateDeltaBatch(dst, sources, count, tables, 0, len);
+                break;
+        }
+    }
+
     private static KernelTier ResolveDefault()
     {
         string? name = Environment.GetEnvironmentVariable(EnvironmentVariable);

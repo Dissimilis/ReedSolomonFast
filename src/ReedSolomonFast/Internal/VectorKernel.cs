@@ -5,8 +5,8 @@ namespace ReedSolomonFast.Internal;
 
 /// <summary>
 /// The multiply-add engine shared by every SIMD tier. Three nested loops bound three resources:
-/// the outer loop walks the byte range in <see cref="ChunkBytes"/> chunks so the streams touched by
-/// one pass fit in L2; inside a chunk, inputs are taken in balanced groups of at most
+/// the outer loop walks the byte range in <see cref="ChunkBytes"/> chunks (16 KiB by default for
+/// multi-group NEON calls) so the streams touched by one pass fit in L2; inside a chunk, inputs are taken in balanced groups of at most
 /// <see cref="MaxInputGroup"/> so no more than sixteen memory streams are live (Zen 4's L1 and L2 are
 /// 8-way and its prefetcher tracks about sixteen streams); and inside a group the loop is Intel
 /// ISA-L's <c>gf_Nvect_dot_prod</c>: one
@@ -78,7 +78,7 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
 
         nuint vecLen = head + ((len - head) & ~(nuint)(Width - 1));
 
-        nuint chunkBytes = (nuint)ChunkBytes;
+        nuint chunkBytes = (nuint)(typeof(T) == typeof(AdvSimdVec) && groups > 1 ? KernelTuning.Arm.MultiGroupChunkBytes : ChunkBytes);
         for (nuint start = head; start < vecLen; start += chunkBytes)
         {
             nuint end = Math.Min(start + chunkBytes, vecLen);
@@ -163,6 +163,47 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
 
         if (vecLen < len)
             ScalarKernel.MulAddDelta(dst + vecLen, a + vecLen, b + vecLen, Gf256.MulPointer + (table[1] << 8), len - vecLen);
+    }
+
+    /// <summary>Accumulates a bounded batch of old/new pairs, reading and writing parity once per position.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static void AccumulateDeltaBatch(byte* dst, byte** sources, int count, byte* tables, byte* gfni, nuint len)
+    {
+        int w = Width;
+        nuint vecLen = len & ~(nuint)(w - 1);
+        nuint i = 0;
+        for (; i + (nuint)(2 * w) <= vecLen; i += (nuint)(2 * w))
+        {
+            T a = T.Load(dst + i);
+            T b = T.Load(dst + i + w);
+            for (int s = 0; s < count; s++)
+            {
+                T lo = T.LoadLo(tables + s * MulTables.ShuffleEntrySize, gfni + s * MulTables.GfniEntrySize);
+                T hi = T.LoadHi(tables + s * MulTables.ShuffleEntrySize);
+                byte* oldData = sources[2 * s] + i;
+                byte* newData = sources[2 * s + 1] + i;
+                a = T.Xor(a, T.Multiply(T.Xor(T.Load(oldData), T.Load(newData)), lo, hi));
+                b = T.Xor(b, T.Multiply(T.Xor(T.Load(oldData + w), T.Load(newData + w)), lo, hi));
+            }
+
+            T.Store(dst + i, a);
+            T.Store(dst + i + w, b);
+        }
+
+        if (i < vecLen)
+        {
+            T a = T.Load(dst + i);
+            for (int s = 0; s < count; s++)
+            {
+                T lo = T.LoadLo(tables + s * MulTables.ShuffleEntrySize, gfni + s * MulTables.GfniEntrySize);
+                T hi = T.LoadHi(tables + s * MulTables.ShuffleEntrySize);
+                a = T.Xor(a, T.Multiply(T.Xor(T.Load(sources[2 * s] + i), T.Load(sources[2 * s + 1] + i)), lo, hi));
+            }
+
+            T.Store(dst + i, a);
+        }
+
+        ScalarKernel.AccumulateDeltaBatch(dst, sources, count, tables, vecLen, len - vecLen);
     }
 
     /// <summary>Non-temporal stores on every qualifying call (probe: env REEDSOLOMONFAST_NT=1); callers opt in per coder through <c>ReedSolomonOptions.StreamingStores</c>.</summary>

@@ -37,6 +37,7 @@ experiments.md
 
 # Machine-local encrypted server credentials
 credentials/
+/keys/
 backup/
 docs/
 scripts/

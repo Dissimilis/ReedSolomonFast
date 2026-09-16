@@ -10,7 +10,7 @@ namespace ReedSolomonFast.Tests;
 /// </summary>
 public unsafe class KernelTests
 {
-    public static readonly int[] Lengths = [0, 1, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 1000, 4096, 65537];
+    public static readonly int[] Lengths = [0, 1, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 1000, 4096, 16383, 16384, 16385, 65537];
 
     public static IEnumerable<object[]> Shapes()
     {

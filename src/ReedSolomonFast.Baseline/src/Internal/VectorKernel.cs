@@ -132,6 +132,80 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
         }
     }
 
+    /// <summary>
+    /// dst ^= c * (a ^ b) over <paramref name="len"/> bytes, with the XOR of the two sources taken in
+    /// registers so the coefficient is applied once per vector rather than once per source. Three
+    /// streams, no chunking needed. <paramref name="table"/> and <paramref name="gfni"/> point at
+    /// the single entry for c.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static void AccumulateDelta(byte* dst, byte* a, byte* b, byte* table, byte* gfni, nuint len)
+    {
+        int w = Width;
+        nuint vecLen = len & ~(nuint)(w - 1);
+        nuint i = 0;
+        T lo = T.LoadLo(table, gfni);
+        T hi = T.LoadHi(table);
+
+        for (; i + (nuint)(2 * w) <= vecLen; i += (nuint)(2 * w))
+        {
+            T d0 = T.Xor(T.Load(a + i), T.Load(b + i));
+            T d1 = T.Xor(T.Load(a + i + w), T.Load(b + i + w));
+            T.Store(dst + i, T.Xor(T.Load(dst + i), T.Multiply(d0, lo, hi)));
+            T.Store(dst + i + w, T.Xor(T.Load(dst + i + w), T.Multiply(d1, lo, hi)));
+        }
+
+        if (i < vecLen)
+        {
+            T d0 = T.Xor(T.Load(a + i), T.Load(b + i));
+            T.Store(dst + i, T.Xor(T.Load(dst + i), T.Multiply(d0, lo, hi)));
+        }
+
+        if (vecLen < len)
+            ScalarKernel.MulAddDelta(dst + vecLen, a + vecLen, b + vecLen, Gf256.MulPointer + (table[1] << 8), len - vecLen);
+    }
+
+    /// <summary>Accumulates a bounded batch of old/new pairs, reading and writing parity once per position.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static void AccumulateDeltaBatch(byte* dst, byte** sources, int count, byte* tables, byte* gfni, nuint len)
+    {
+        int w = Width;
+        nuint vecLen = len & ~(nuint)(w - 1);
+        nuint i = 0;
+        for (; i + (nuint)(2 * w) <= vecLen; i += (nuint)(2 * w))
+        {
+            T a = T.Load(dst + i);
+            T b = T.Load(dst + i + w);
+            for (int s = 0; s < count; s++)
+            {
+                T lo = T.LoadLo(tables + s * MulTables.ShuffleEntrySize, gfni + s * MulTables.GfniEntrySize);
+                T hi = T.LoadHi(tables + s * MulTables.ShuffleEntrySize);
+                byte* oldData = sources[2 * s] + i;
+                byte* newData = sources[2 * s + 1] + i;
+                a = T.Xor(a, T.Multiply(T.Xor(T.Load(oldData), T.Load(newData)), lo, hi));
+                b = T.Xor(b, T.Multiply(T.Xor(T.Load(oldData + w), T.Load(newData + w)), lo, hi));
+            }
+
+            T.Store(dst + i, a);
+            T.Store(dst + i + w, b);
+        }
+
+        if (i < vecLen)
+        {
+            T a = T.Load(dst + i);
+            for (int s = 0; s < count; s++)
+            {
+                T lo = T.LoadLo(tables + s * MulTables.ShuffleEntrySize, gfni + s * MulTables.GfniEntrySize);
+                T hi = T.LoadHi(tables + s * MulTables.ShuffleEntrySize);
+                a = T.Xor(a, T.Multiply(T.Xor(T.Load(sources[2 * s] + i), T.Load(sources[2 * s + 1] + i)), lo, hi));
+            }
+
+            T.Store(dst + i, a);
+        }
+
+        ScalarKernel.AccumulateDeltaBatch(dst, sources, count, tables, vecLen, len - vecLen);
+    }
+
     /// <summary>Non-temporal stores on every qualifying call (probe: env REEDSOLOMONFAST_NT=1); callers opt in per coder through <c>ReedSolomonOptions.StreamingStores</c>.</summary>
     public static readonly bool NonTemporal = KernelTuning.Read("REEDSOLOMONFAST_NT", 0, 0, 1) == 1;
 

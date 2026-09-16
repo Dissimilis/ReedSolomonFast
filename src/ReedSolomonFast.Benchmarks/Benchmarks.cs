@@ -37,13 +37,15 @@ internal static class Geometry
 }
 
 /// <summary>
-/// THE DECISION HARNESS: frozen pre-optimization code versus current code, in one process.
+/// THE DECISION HARNESS: frozen pre-optimization code versus current code, in separate benchmark processes.
 ///
 /// Read the Ratio column against the "before" row of the same geometry and size. Below 1.00 is an
 /// improvement. The run prints an explicit per-case verdict afterwards; prefer that to eyeballing
 /// the table. BenchmarkDotNet runs each case in its own process sequentially, so the earlier row of
 /// a pair runs on a slightly cooler package: the bias understates wins and overstates regressions.
-/// Pin clocks for any run you intend to act on.
+/// Pin clocks and measure identical-code noise for any run you intend to act on. The paired Update
+/// mode alternates both implementations on the same buffers in one process when separate-process
+/// layout and timing differences exceed the effect being measured.
 /// </summary>
 public class OptimizationBenchmarks
 {

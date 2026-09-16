@@ -7,8 +7,10 @@ A frozen snapshot of `src/ReedSolomonFast`, compiled under the assembly name
 
 On a laptop that thermally throttles, comparing today's numbers against numbers recorded in an
 earlier session is not evidence. The only reliable control is old code and new code measured back
-to back in the same process, in the same session, under the same thermal conditions. That is what
-this project provides.
+to back in the same process, in the same session, under the same thermal conditions. This project
+makes both implementations available to that comparison. BenchmarkDotNet runs individual methods
+in separate processes, so its A/B results still need an identical-code noise check; `--paired-update`
+and `--paired-coding` alternate the two implementations on the same buffers in one process.
 
 The shipped NuGet package cannot serve this purpose: it and the project both produce an assembly
 with the simple name `ReedSolomonFast`, and the default `AssemblyLoadContext` will not load two
@@ -17,8 +19,11 @@ benchmarked calls ordinary statically compiled calls.
 
 ## Snapshot provenance
 
-Snapshot of `src/ReedSolomonFast` at commit `1a68717` ("Add ReedSolomonStreams: encode, reconstruct
-and verify over streams"), taken 2026-09-10 at the start of the second campaign. During an optimization
+Snapshot of the working library at the start of the ODROID/Fedora campaign on 2026-09-14:
+commit `07ca0c89ec31a91285eaa402e7b5ee93e43d705f` plus the validated, uncommitted Fedora
+batched-Update changes. The exact source hashes and patch are recorded in
+`docs/benchmarks/odroid-20260914/baseline-source-sha256.txt` and `campaign-start.patch`.
+This refresh supersedes the earlier Fedora campaign snapshot. During an optimization
 campaign the baseline is moved forward to the last landed commit, so each experiment is measured
 against the code it is trying to improve. Numbers taken before and after a refresh are not comparable.
 

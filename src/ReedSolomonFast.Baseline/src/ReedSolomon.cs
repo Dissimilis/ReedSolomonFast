@@ -951,14 +951,16 @@ public sealed unsafe partial class ReedSolomon
     /// <summary>Shard length up to which a many-output call is split by outputs rather than by byte range.</summary>
     private const int OutputSplitMaxLength = 256 * 1024;
 
-    private void Run(byte** srcs, int srcCount, byte** dsts, int dstCount, byte* shuffle, byte* gfni, nuint len, bool accumulate = false, bool stream = false)
+    // delta: Update over interleaved old/new pairs, with one coefficient per pair. It takes
+    // the byte-range parallel path; the single-pair specialization keeps its existing loop.
+    private void Run(byte** srcs, int srcCount, byte** dsts, int dstCount, byte* shuffle, byte* gfni, nuint len, bool accumulate = false, bool stream = false, bool delta = false)
     {
         int workers = _maxDegreeOfParallelism;
 
         // Many outputs on shards that fit L3: split by blocks of four outputs, so each worker owns
         // whole outputs, no worker reloads another's partial sums, and the inputs are shared through
         // L3. Gated on work (bytes touched), not shard length: 50+20 at 64 KiB is a millisecond.
-        if (workers > 1 && dstCount >= 8 && len <= OutputSplitMaxLength)
+        if (workers > 1 && dstCount >= 8 && len <= OutputSplitMaxLength && !delta)
         {
             int blocks = (dstCount + 3) / 4;
             nuint work = len * (nuint)(srcCount * blocks + dstCount);
@@ -993,7 +995,9 @@ public sealed unsafe partial class ReedSolomon
 
         if (workers <= 1)
         {
-            Internal.Kernel.DotProduct(Kernel, srcs, srcCount, dsts, dstCount, shuffle, gfni, len, accumulate, stream);
+            if (delta && srcCount > 2) Internal.Kernel.AccumulateDeltaBatch(Kernel, dsts[0], srcs, srcCount / 2, shuffle, gfni, len);
+            else if (delta) Internal.Kernel.AccumulateDelta(Kernel, dsts[0], srcs[0], srcs[1], shuffle, gfni, len);
+            else Internal.Kernel.DotProduct(Kernel, srcs, srcCount, dsts, dstCount, shuffle, gfni, len, accumulate, stream);
             return;
         }
 
@@ -1014,6 +1018,7 @@ public sealed unsafe partial class ReedSolomon
             Chunk = chunk,
             Accumulate = accumulate,
             Stream = stream,
+            Delta = delta,
         };
         Parallel.For(0, workers, new ParallelOptions { MaxDegreeOfParallelism = workers }, job.Execute);
     }
@@ -1031,6 +1036,7 @@ public sealed unsafe partial class ReedSolomon
         public nuint Chunk;
         public bool Accumulate;
         public bool Stream;
+        public bool Delta;
         public int OutputsPerWorker;
 
         /// <summary>Output-block split: worker <paramref name="worker"/> computes its own outputs over the whole length.</summary>
@@ -1054,14 +1060,19 @@ public sealed unsafe partial class ReedSolomon
             byte** dsts = stackalloc byte*[DstCount];
             for (int i = 0; i < SrcCount; i++) srcs[i] = ((byte**)Srcs)[i] + offset;
             for (int i = 0; i < DstCount; i++) dsts[i] = ((byte**)Dsts)[i] + offset;
-            Internal.Kernel.DotProduct(Tier, srcs, SrcCount, dsts, DstCount, (byte*)Shuffle, (byte*)Gfni, n, Accumulate, Stream);
+            if (Delta && SrcCount > 2) Internal.Kernel.AccumulateDeltaBatch(Tier, dsts[0], srcs, SrcCount / 2, (byte*)Shuffle, (byte*)Gfni, n);
+            else if (Delta) Internal.Kernel.AccumulateDelta(Tier, dsts[0], srcs[0], srcs[1], (byte*)Shuffle, (byte*)Gfni, n);
+            else Internal.Kernel.DotProduct(Tier, srcs, SrcCount, dsts, DstCount, (byte*)Shuffle, (byte*)Gfni, n, Accumulate, Stream);
         }
     }
 
     /// <summary>
     /// Verification over pinned shards in pieces: encode one piece of every parity shard into a pooled
-    /// scratch of ParityShards x <see cref="VerifyPieceBytes"/>, compare with the real parity, stop at
-    /// the first mismatch. The scratch stays in L2, so memory traffic is the data and the parity, once.
+    /// scratch, compare with the real parity, stop at the first mismatch. A piece is
+    /// <see cref="VerifyPieceBytes"/> per parity shard, so the scratch is small enough to stay cached
+    /// for the usual parity counts (it is 1.25 MiB at twenty parity shards, above a 1 MiB L2).
+    /// Padding the scratch stride the way <see cref="AllocateShards"/> does was measured and did not
+    /// help (experiments 35): the pieces are consumed the moment they are written.
     /// </summary>
     private struct VerifyOperation : IPinnedOperation
     {
@@ -1179,8 +1190,7 @@ public sealed unsafe partial class ReedSolomon
     }
 
     /// <summary>
-    /// Update over pinned old, new and parity memories: for each changed index, one in-place kernel
-    /// call per parity shard with rows [1, c, c]. Pins everything once instead of once per index.
+    /// Updates pinned parity from old/new pairs, batching changed shards on the measured GFNI-512 path.
     /// </summary>
     private struct UpdateOperation : IPinnedOperation
     {
@@ -1199,6 +1209,14 @@ public sealed unsafe partial class ReedSolomon
 
         public void Execute(byte** ptrs)
         {
+            // The Fedora campaign measures this tier at 64 KiB and above. Keep small shards and
+            // other tiers on their existing path until batching has measurements there too.
+            if (_count > 1 && _len >= 65_536 && _coder.Kernel == KernelTier.GfniAvx512)
+            {
+                ExecuteBatches(ptrs);
+                return;
+            }
+
             for (int i = 0; i < _count; i++)
             {
                 var op = new AccumulateOperation(_coder, null, _coder.UpdateTables(_indices[i]), 3, _len)
@@ -1210,15 +1228,53 @@ public sealed unsafe partial class ReedSolomon
                 op.Execute(ptrs);
             }
         }
+
+        private void ExecuteBatches(byte** ptrs)
+        {
+            // Four changes keep the live streams bounded to eight inputs and one parity output.
+            const int batchSize = 4;
+            byte** sources = stackalloc byte*[2 * batchSize];
+            byte** destination = stackalloc byte*[1];
+            byte* shuffle = stackalloc byte[batchSize * MulTables.ShuffleEntrySize];
+            byte* gfni = stackalloc byte[batchSize * MulTables.GfniEntrySize];
+            MulTables tables = _coder._encodeTables;
+            for (int start = 0; start < _count; start += batchSize)
+            {
+                int count = Math.Min(batchSize, _count - start);
+                for (int i = 0; i < count; i++)
+                {
+                    sources[2 * i] = ptrs[start + i];
+                    sources[2 * i + 1] = ptrs[_count + start + i];
+                }
+
+                for (int p = 0; p < _coder.ParityShards; p++)
+                {
+                    for (int i = 0; i < count; i++)
+                    {
+                        int entry = p * _coder.DataShards + _indices[start + i];
+                        Buffer.MemoryCopy(tables.Pointer + entry * MulTables.ShuffleEntrySize,
+                            shuffle + i * MulTables.ShuffleEntrySize, MulTables.ShuffleEntrySize, MulTables.ShuffleEntrySize);
+                        Buffer.MemoryCopy(tables.Pointer + tables.GfniOffset + entry * MulTables.GfniEntrySize,
+                            gfni + i * MulTables.GfniEntrySize, MulTables.GfniEntrySize, MulTables.GfniEntrySize);
+                    }
+
+                    destination[0] = ptrs[2 * _count + p];
+                    _coder.Run(sources, 2 * count, destination, 1, shuffle, gfni, _len, accumulate: true, delta: true);
+                }
+            }
+
+            GC.KeepAlive(tables);
+        }
     }
 
     /// <summary>
-    /// parity_p = 1 * parity_p ^ c_p * shard (two sources) or ^ c_p * old ^ c_p * new (three sources),
-    /// in place, one kernel call per parity shard. In-place is safe only because the source count
-    /// stays within <see cref="Internal.Kernel.MaxInPlaceSources"/>; see the note there. Measured
-    /// (experiments 19): at 64 KiB with eight or more parity shards this per-parity form beats a
-    /// single multi-output accumulate pass by 15-70%, while the batch <see cref="EncodeShards"/>
-    /// beats both several times over.
+    /// parity_p ^= c_p * shard (two-source tables) or parity_p ^= c_p * (old ^ new) (three-source
+    /// tables), one kernel call per parity shard, the parity a destination only: the accumulate
+    /// mode for the shard, the delta kernel for old and new, one multiply per vector either way
+    /// (experiments 36-37: on the N1 a third off EncodeShard and two thirds off Update against
+    /// the earlier [1, c] and [1, c, c] dot products). The per-parity form was chosen over one
+    /// multi-output accumulate pass in experiments 19 and 30 (cache-set aliasing of many
+    /// accumulating outputs); the batch <see cref="EncodeShards"/> beats both several times over.
     /// </summary>
     private struct AccumulateOperation : IPinnedOperation
     {
@@ -1244,26 +1300,28 @@ public sealed unsafe partial class ReedSolomon
 
         public void Execute(byte** ptrs)
         {
-            byte** srcs = stackalloc byte*[3];
+            // The parity row's leading 1 is not multiplied: the kernel's accumulate mode loads the
+            // parity and XORs it in, so the shard is the only source (one multiply per vector).
+            // Update takes old and new through the delta kernel, c * (old ^ new), one multiply too.
+            byte** srcs = stackalloc byte*[2];
             byte** dsts = stackalloc byte*[1];
+            int sources = _srcCount - 1;
             for (int p = 0; p < _tables.Rows; p++)
             {
-                byte* parity = ptrs[ParityOffset + p];
-                srcs[0] = parity;
-                if (_srcCount == 2)
+                if (sources == 1)
                 {
-                    srcs[1] = _shard;
+                    srcs[0] = _shard;
                 }
                 else
                 {
-                    srcs[1] = ptrs[OldIndex];
-                    srcs[2] = ptrs[NewIndex];
+                    srcs[0] = ptrs[OldIndex];
+                    srcs[1] = ptrs[NewIndex];
                 }
 
-                dsts[0] = parity;
-                byte* shuffle = _tables.Pointer + (nuint)(p * _srcCount) * MulTables.ShuffleEntrySize;
-                byte* gfni = _tables.Pointer + _tables.GfniOffset + (nuint)(p * _srcCount) * MulTables.GfniEntrySize;
-                _coder.Run(srcs, _srcCount, dsts, 1, shuffle, gfni, _len);
+                dsts[0] = ptrs[ParityOffset + p];
+                byte* shuffle = _tables.Pointer + (nuint)(p * _srcCount + 1) * MulTables.ShuffleEntrySize;
+                byte* gfni = _tables.Pointer + _tables.GfniOffset + (nuint)(p * _srcCount + 1) * MulTables.GfniEntrySize;
+                _coder.Run(srcs, sources, dsts, 1, shuffle, gfni, _len, accumulate: true, delta: sources == 2);
             }
 
             GC.KeepAlive(_tables);
