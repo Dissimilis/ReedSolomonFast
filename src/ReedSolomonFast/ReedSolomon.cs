@@ -213,10 +213,40 @@ public sealed unsafe partial class ReedSolomon
         CheckNoOverlap(shards, parity);
 
         int n = dataIndices.Length;
-        MulTables tables = ColumnTables(dataIndices, repeat: 1);
+        int entries = ParityShards * n;
+        int tableBytes = entries * (MulTables.ShuffleEntrySize + MulTables.GfniEntrySize);
+        // The coder already owns every coefficient's tables. Copy the selected columns instead
+        // of rebuilding them in a new pinned object; cap stack use for large legal geometries.
+        byte[]? rented = null;
+        Span<byte> storage = tableBytes <= 4096
+            ? stackalloc byte[tableBytes]
+            : (rented = ArrayPool<byte>.Shared.Rent(tableBytes));
         byte** ptrs = stackalloc byte*[n + ParityShards];
-        var op = new DotOperation(this, null, n, null, ParityShards, tables, 0, (nuint)len) { Accumulate = true };
-        Pinner.Run(shards, default, parity, ptrs, ref op);
+        try
+        {
+            fixed (byte* shuffle = storage)
+            {
+                byte* gfni = shuffle + entries * MulTables.ShuffleEntrySize;
+                for (int p = 0; p < ParityShards; p++)
+                for (int i = 0; i < n; i++)
+                {
+                    int source = p * DataShards + dataIndices[i];
+                    int target = p * n + i;
+                    Buffer.MemoryCopy(_encodeTables.Pointer + source * MulTables.ShuffleEntrySize,
+                        shuffle + target * MulTables.ShuffleEntrySize, MulTables.ShuffleEntrySize, MulTables.ShuffleEntrySize);
+                    Buffer.MemoryCopy(_encodeTables.Pointer + _encodeTables.GfniOffset + source * MulTables.GfniEntrySize,
+                        gfni + target * MulTables.GfniEntrySize, MulTables.GfniEntrySize, MulTables.GfniEntrySize);
+                }
+
+                var op = new BatchEncodeOperation(this, n, shuffle, gfni, (nuint)len);
+                Pinner.Run(shards, default, parity, ptrs, ref op);
+            }
+        }
+        finally
+        {
+            if (rented is not null) ArrayPool<byte>.Shared.Return(rented);
+            GC.KeepAlive(_encodeTables);
+        }
     }
 
     /// <summary>
@@ -915,22 +945,6 @@ public sealed unsafe partial class ReedSolomon
         return Interlocked.CompareExchange(ref _updateTables[dataIndex], t, null) ?? t;
     }
 
-    /// <summary>
-    /// Tables for a batch of data indices: ParityShards rows over the chosen columns of the coding
-    /// matrix, each column repeated <paramref name="repeat"/> times (twice for Update's old and new).
-    /// Built per call; a batch is at most DataShards columns and the tables are a few KiB.
-    /// </summary>
-    private MulTables ColumnTables(ReadOnlySpan<int> dataIndices, int repeat)
-    {
-        int n = dataIndices.Length;
-        var rows = new byte[ParityShards * n * repeat];
-        for (int p = 0; p < ParityShards; p++)
-            for (int r = 0; r < repeat; r++)
-                for (int i = 0; i < n; i++)
-                    rows[p * n * repeat + r * n + i] = _matrix[DataShards + p, dataIndices[i]];
-        return new MulTables(rows, ParityShards, n * repeat);
-    }
-
     private void CheckDistinctDataIndices(ReadOnlySpan<int> indices)
     {
         if (indices.Length > DataShards)
@@ -1168,6 +1182,7 @@ public sealed unsafe partial class ReedSolomon
             _tables = tables;
             _tableRow = tableRow;
             _len = len;
+            Accumulate = false;
         }
 
         public void Execute(byte** ptrs)
@@ -1187,6 +1202,13 @@ public sealed unsafe partial class ReedSolomon
             _coder.Run(srcs, _srcCount, dsts, DstCount, shuffle, gfni, _len, Accumulate, Stream);
             GC.KeepAlive(_tables);
         }
+    }
+
+    /// <summary>Uses copied encode tables while their temporary storage and all shard buffers are pinned.</summary>
+    private readonly struct BatchEncodeOperation(ReedSolomon coder, int count, byte* shuffle, byte* gfni, nuint len) : IPinnedOperation
+    {
+        public void Execute(byte** ptrs) =>
+            coder.Run(ptrs, count, ptrs + count, coder.ParityShards, shuffle, gfni, len, accumulate: true);
     }
 
     /// <summary>
