@@ -23,7 +23,7 @@ internal unsafe interface IGfVector<TSelf> where TSelf : unmanaged, IGfVector<TS
     /// </summary>
     static abstract int Unroll4 { get; }
 
-    /// <summary>Eight outputs per pass: eight accumulators, eight multipliers and one data vector. Only where a multiplier is one register and 32 exist (GFNI-512).</summary>
+    /// <summary>Eight outputs per pass: eight accumulators, eight multipliers and one data vector. Requires a one-register multiplier and 32 vector registers.</summary>
     static abstract bool Block8 { get; }
 
     static abstract TSelf Load(byte* p);
@@ -179,7 +179,8 @@ internal readonly unsafe struct GfniAvx2Vec : IGfVector<GfniAvx2Vec>
 
     public static bool IsSupported => Gfni.V256.IsSupported;
     public static int Unroll4 => 1;
-    public static bool Block8 => false;
+    // AVX-512VL provides the extra registers needed to avoid spilling the eight-output body.
+    public static bool Block8 => Environment.Is64BitProcess && Avx512BW.VL.IsSupported;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static GfniAvx2Vec Load(byte* p) => new(Vector256.Load(p));

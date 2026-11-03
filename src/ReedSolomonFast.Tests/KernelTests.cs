@@ -199,4 +199,37 @@ public unsafe class KernelTests
                     }
                 }
     }
+
+    [Theory]
+    [MemberData(nameof(Tiers))]
+    public void DotProduct_EightOutputs_InputBoundariesPreserveGuards(KernelTier tier)
+    {
+        if (!KernelTestHelpers.IsSupported(tier)) return;
+        const int offset = 3, guard = 17;
+        var random = new Random(11038);
+        foreach (int sources in new[] { 7, 8, 9 })
+        foreach (int outputs in new[] { 8, 9, 16 })
+        foreach (int length in new[] { 31, 32, 33, 63, 64, 65, 257, 65_537 })
+        foreach (bool accumulate in new[] { false, true })
+        {
+            if (length == 65_537 && (sources != 8 || outputs != 8)) continue;
+            var input = Enumerable.Range(0, sources)
+                .Select(_ => KernelTestHelpers.RandomBytes(offset + length + guard, random)).ToArray();
+            var output = Enumerable.Range(0, outputs)
+                .Select(_ => KernelTestHelpers.RandomBytes(offset + length + guard, random)).ToArray();
+            var initial = output.Select(x => x.ToArray()).ToArray();
+            var coefficients = KernelTestHelpers.RandomBytes(sources * outputs, random);
+            var expected = KernelTestHelpers.ReferenceDotProduct(input, coefficients, outputs, length, offset);
+            KernelTestHelpers.Invoke(tier, input, output, coefficients, length, offset, accumulate);
+            for (int d = 0; d < outputs; d++)
+            {
+                Assert.Equal(initial[d][..offset], output[d][..offset]);
+                Assert.Equal(initial[d][(offset + length)..], output[d][(offset + length)..]);
+                if (accumulate)
+                    for (int i = 0; i < length; i++) expected[d][i] ^= initial[d][offset + i];
+                Assert.True(expected[d].AsSpan().SequenceEqual(output[d].AsSpan(offset, length)),
+                    $"tier={tier}, sources={sources}, outputs={outputs}, length={length}, accumulate={accumulate}");
+            }
+        }
+    }
 }
