@@ -1231,9 +1231,9 @@ public sealed unsafe partial class ReedSolomon
 
         public void Execute(byte** ptrs)
         {
-            // The Fedora campaign measures this tier at 64 KiB and above. Keep small shards and
+            // The Fedora campaign measures this tier at 32 KiB and above. Keep small shards and
             // other tiers on their existing path until batching has measurements there too.
-            if (_count > 1 && _len >= 65_536 && _coder.Kernel == KernelTier.GfniAvx512)
+            if (_count > 1 && _len >= 32_768 && _coder.Kernel == KernelTier.GfniAvx512)
             {
                 ExecuteBatches(ptrs);
                 return;
@@ -1255,18 +1255,23 @@ public sealed unsafe partial class ReedSolomon
         {
             // Four changes keep the live streams bounded to eight inputs and one parity output.
             const int batchSize = 4;
+            // With few parity outputs, finish every change in a cache-sized piece before moving
+            // on. Large parity counts lost this benefit in the combined-source measurements.
+            nuint piece = _coder._maxDegreeOfParallelism == 1 && _count > batchSize && _coder.ParityShards <= 4
+                ? Math.Min(_len, (nuint)65_536) : _len;
             byte** sources = stackalloc byte*[2 * batchSize];
             byte** destination = stackalloc byte*[1];
             byte* shuffle = stackalloc byte[batchSize * MulTables.ShuffleEntrySize];
             byte* gfni = stackalloc byte[batchSize * MulTables.GfniEntrySize];
             MulTables tables = _coder._encodeTables;
+            for (nuint offset = 0; offset < _len; offset += piece)
             for (int start = 0; start < _count; start += batchSize)
             {
                 int count = Math.Min(batchSize, _count - start);
                 for (int i = 0; i < count; i++)
                 {
-                    sources[2 * i] = ptrs[start + i];
-                    sources[2 * i + 1] = ptrs[_count + start + i];
+                    sources[2 * i] = ptrs[start + i] + offset;
+                    sources[2 * i + 1] = ptrs[_count + start + i] + offset;
                 }
 
                 for (int p = 0; p < _coder.ParityShards; p++)
@@ -1280,8 +1285,8 @@ public sealed unsafe partial class ReedSolomon
                             gfni + i * MulTables.GfniEntrySize, MulTables.GfniEntrySize, MulTables.GfniEntrySize);
                     }
 
-                    destination[0] = ptrs[2 * _count + p];
-                    _coder.Run(sources, 2 * count, destination, 1, shuffle, gfni, _len, accumulate: true, delta: true);
+                    destination[0] = ptrs[2 * _count + p] + offset;
+                    _coder.Run(sources, 2 * count, destination, 1, shuffle, gfni, Math.Min(piece, _len - offset), accumulate: true, delta: true);
                 }
             }
 

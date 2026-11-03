@@ -7,10 +7,10 @@ namespace ReedSolomonFast.Internal;
 /// The multiply-add engine shared by every SIMD tier. Three nested loops bound three resources:
 /// the outer loop walks the byte range in <see cref="ChunkBytes"/> chunks (16 KiB by default for
 /// multi-group NEON calls) so the streams touched by one pass fit in L2; inside a chunk, inputs are taken in balanced groups of at most
-/// <see cref="MaxInputGroup"/> so no more than sixteen memory streams are live (Zen 4's L1 and L2 are
-/// 8-way and its prefetcher tracks about sixteen streams); and inside a group the loop is Intel
+/// <see cref="MaxInputGroup"/> to bound the live memory streams (twelve inputs plus four outputs
+/// on x86; NEON also uses five-output bodies); and inside a group the loop is Intel
 /// ISA-L's <c>gf_Nvect_dot_prod</c>: one
-/// vector position at a time, every input loaded once, up to four output accumulators in registers.
+/// vector position at a time, every input loaded once, with output accumulators in registers.
 /// Multipliers are re-broadcast from the L1-resident tables per input per position; the register
 /// file cannot hold them for more than a handful of inputs.
 /// </summary>
@@ -20,8 +20,8 @@ namespace ReedSolomonFast.Internal;
 /// 10 GB/s at 64 KiB shards: seventy streams at the same page offset evicted each other from every
 /// cache set. Groups are balanced because a short trailing group costs nearly a full pass: with a
 /// fixed group of eight, 10+4 encode measured 1.48x slower than a single pass of ten.
-/// One- and two-output bodies process two vectors per iteration; three- and four-output
-/// bodies do not, because on 16-register targets the extra accumulators and multipliers would spill.
+/// One- and two-output bodies process two vectors per iteration. NEON also uses two-vector
+/// bodies for three, four and five outputs; its 32 vector registers can hold the extra accumulators.
 /// Bytes past the last whole vector go through <see cref="ScalarKernel"/>.
 ///
 /// In-place use: a destination may alias an input only when all inputs fit in one group, because
@@ -30,7 +30,7 @@ namespace ReedSolomonFast.Internal;
 /// </remarks>
 internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
 {
-    /// <summary>Largest input group; see the class remarks. Twelve inputs plus four outputs is sixteen streams.</summary>
+    /// <summary>Largest input group; see the class remarks. Twelve inputs plus the usual four outputs is sixteen streams.</summary>
     /// <remarks>Static readonly rather than const so the benchmark sweep can override it per process; the JIT still folds it in tier-1 code.</remarks>
     public static readonly int MaxInputGroup = KernelTuning.Read("REEDSOLOMONFAST_GROUP", 12, 1, 256);
 
@@ -97,6 +97,11 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
                         Block8(groupSrcs, count, srcCount, accumulateGroup, stream, dsts + d, Row(groupTables, d, srcCount), RowGfni(groupGfni, d, srcCount), start, end);
                 }
 
+                if (typeof(T) == typeof(AdvSimdVec))
+                    // Avoid five plus one/three when four plus two/four reuses the inputs better.
+                    for (; d + 5 <= dstCount && dstCount - d != 6 && dstCount - d != 8; d += 5)
+                        Block5x2(groupSrcs, count, srcCount, accumulateGroup, stream, dsts + d, Row(groupTables, d, srcCount), RowGfni(groupGfni, d, srcCount), start, end);
+
                 for (; d + 4 <= dstCount; d += 4)
                 {
                     if (T.Unroll4 == 2)
@@ -114,7 +119,10 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
                         Block2(groupSrcs, count, srcCount, accumulateGroup, stream, dsts + d, Row(groupTables, d, srcCount), RowGfni(groupGfni, d, srcCount), start, end);
                         break;
                     case 3:
-                        Block3(groupSrcs, count, srcCount, accumulateGroup, stream, dsts + d, Row(groupTables, d, srcCount), RowGfni(groupGfni, d, srcCount), start, end);
+                        if (typeof(T) == typeof(AdvSimdVec))
+                            Block3x2(groupSrcs, count, srcCount, accumulateGroup, stream, dsts + d, Row(groupTables, d, srcCount), RowGfni(groupGfni, d, srcCount), start, end);
+                        else
+                            Block3(groupSrcs, count, srcCount, accumulateGroup, stream, dsts + d, Row(groupTables, d, srcCount), RowGfni(groupGfni, d, srcCount), start, end);
                         break;
                 }
             }
@@ -141,6 +149,12 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static void AccumulateDelta(byte* dst, byte* a, byte* b, byte* table, byte* gfni, nuint len)
     {
+        if (typeof(T) == typeof(AdvSimdVec))
+        {
+            Delta4(dst, a, b, table, gfni, len);
+            return;
+        }
+
         int w = Width;
         nuint vecLen = len & ~(nuint)(w - 1);
         nuint i = 0;
@@ -161,6 +175,39 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
             T.Store(dst + i, T.Xor(T.Load(dst + i), T.Multiply(d0, lo, hi)));
         }
 
+        if (vecLen < len)
+            ScalarKernel.MulAddDelta(dst + vecLen, a + vecLen, b + vecLen, Gf256.MulPointer + (table[1] << 8), len - vecLen);
+    }
+
+    /// <summary>Four-vector NEON delta loop, with invariant coefficients and a scalar byte tail.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void Delta4(byte* dst, byte* a, byte* b, byte* table, byte* gfni, nuint len)
+    {
+        int w = Width;
+        nuint vecLen = len & ~(nuint)(w - 1);
+        nuint i = 0;
+        T lo = T.LoadLo(table, gfni);
+        T hi = T.LoadHi(table);
+        for (; i + (nuint)(4 * w) <= vecLen; i += (nuint)(4 * w))
+        {
+            T d0 = T.Xor(T.Load(a + i), T.Load(b + i));
+            T r0 = T.Xor(T.Load(dst + i), T.Multiply(d0, lo, hi));
+            T d1 = T.Xor(T.Load(a + i + w), T.Load(b + i + w));
+            T r1 = T.Xor(T.Load(dst + i + w), T.Multiply(d1, lo, hi));
+            T d2 = T.Xor(T.Load(a + i + 2 * w), T.Load(b + i + 2 * w));
+            T r2 = T.Xor(T.Load(dst + i + 2 * w), T.Multiply(d2, lo, hi));
+            T d3 = T.Xor(T.Load(a + i + 3 * w), T.Load(b + i + 3 * w));
+            T r3 = T.Xor(T.Load(dst + i + 3 * w), T.Multiply(d3, lo, hi));
+            T.Store(dst + i, r0);
+            T.Store(dst + i + w, r1);
+            T.Store(dst + i + 2 * w, r2);
+            T.Store(dst + i + 3 * w, r3);
+        }
+        for (; i < vecLen; i += (nuint)w)
+        {
+            T d = T.Xor(T.Load(a + i), T.Load(b + i));
+            T.Store(dst + i, T.Xor(T.Load(dst + i), T.Multiply(d, lo, hi)));
+        }
         if (vecLen < len)
             ScalarKernel.MulAddDelta(dst + vecLen, a + vecLen, b + vecLen, Gf256.MulPointer + (table[1] << 8), len - vecLen);
     }
@@ -239,6 +286,13 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static void Block1(byte** srcs, int count, int stride, bool accumulate, bool stream, byte** dsts, byte* t0, byte* g0, nuint start, nuint end)
     {
+        // Short calls cannot amortize the specialized body's dispatch and coefficient setup.
+        if (typeof(T) == typeof(AdvSimdVec) && count == 1 && end - start >= 128)
+        {
+            Block1Single(srcs, dsts, t0, g0, start, end, accumulate, stream);
+            return;
+        }
+
         int w = Width;
         byte* dst0 = dsts[0];
         nuint i = start;
@@ -260,8 +314,8 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
                 lo = T.LoadLo(t0 + s * MulTables.ShuffleEntrySize, g0 + s * MulTables.GfniEntrySize);
                 hi = T.LoadHi(t0 + s * MulTables.ShuffleEntrySize);
                 byte* src = srcs[s] + i;
-                a = T.Xor(a, T.Multiply(T.Load(src), lo, hi));
-                b = T.Xor(b, T.Multiply(T.Load(src + w), lo, hi));
+                a = T.MultiplyAdd(a, T.Load(src), lo, hi);
+                b = T.MultiplyAdd(b, T.Load(src + w), lo, hi);
             }
 
             Put(stream, dst0 + i, a);
@@ -276,10 +330,40 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
             {
                 T lo = T.LoadLo(t0 + s * MulTables.ShuffleEntrySize, g0 + s * MulTables.GfniEntrySize);
                 T hi = T.LoadHi(t0 + s * MulTables.ShuffleEntrySize);
-                a = T.Xor(a, T.Multiply(T.Load(srcs[s] + i), lo, hi));
+                a = T.MultiplyAdd(a, T.Load(srcs[s] + i), lo, hi);
             }
 
             Put(stream, dst0 + i, a);
+        }
+    }
+
+    /// <summary>One NEON source and output: coefficients remain invariant across the byte loop.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void Block1Single(byte** srcs, byte** dsts, byte* table, byte* gfni, nuint start, nuint end, bool accumulate, bool stream)
+    {
+        int w = Width;
+        T lo = T.LoadLo(table, gfni);
+        T hi = T.LoadHi(table);
+        byte* src = srcs[0];
+        byte* dst = dsts[0];
+        nuint i = start;
+        for (; i + (nuint)(2 * w) <= end; i += (nuint)(2 * w))
+        {
+            T a = T.Multiply(T.Load(src + i), lo, hi);
+            T b = T.Multiply(T.Load(src + i + w), lo, hi);
+            if (accumulate)
+            {
+                a = T.Xor(a, T.Load(dst + i));
+                b = T.Xor(b, T.Load(dst + i + w));
+            }
+            Put(stream, dst + i, a);
+            Put(stream, dst + i + w, b);
+        }
+        if (i < end)
+        {
+            T a = T.Multiply(T.Load(src + i), lo, hi);
+            if (accumulate) a = T.Xor(a, T.Load(dst + i));
+            Put(stream, dst + i, a);
         }
     }
 
@@ -325,10 +409,10 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
                 hi0 = T.LoadHi(t0 + so);
                 lo1 = T.LoadLo(t1 + so, g1 + go);
                 hi1 = T.LoadHi(t1 + so);
-                a0 = T.Xor(a0, T.Multiply(va, lo0, hi0));
-                b0 = T.Xor(b0, T.Multiply(vb, lo0, hi0));
-                a1 = T.Xor(a1, T.Multiply(va, lo1, hi1));
-                b1 = T.Xor(b1, T.Multiply(vb, lo1, hi1));
+                a0 = T.MultiplyAdd(a0, va, lo0, hi0);
+                b0 = T.MultiplyAdd(b0, vb, lo0, hi0);
+                a1 = T.MultiplyAdd(a1, va, lo1, hi1);
+                b1 = T.MultiplyAdd(b1, vb, lo1, hi1);
             }
 
             Put(stream, dst0 + i, a0);
@@ -353,8 +437,8 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
                 v = T.Load(srcs[s] + i);
                 int so = s * MulTables.ShuffleEntrySize;
                 int go = s * MulTables.GfniEntrySize;
-                a0 = T.Xor(a0, T.Multiply(v, T.LoadLo(t0 + so, g0 + go), T.LoadHi(t0 + so)));
-                a1 = T.Xor(a1, T.Multiply(v, T.LoadLo(t1 + so, g1 + go), T.LoadHi(t1 + so)));
+                a0 = T.MultiplyAdd(a0, v, T.LoadLo(t0 + so, g0 + go), T.LoadHi(t0 + so));
+                a1 = T.MultiplyAdd(a1, v, T.LoadLo(t1 + so, g1 + go), T.LoadHi(t1 + so));
             }
 
             Put(stream, dst0 + i, a0);
@@ -393,9 +477,9 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
                 v = T.Load(srcs[s] + i);
                 int so = s * MulTables.ShuffleEntrySize;
                 int go = s * MulTables.GfniEntrySize;
-                a0 = T.Xor(a0, T.Multiply(v, T.LoadLo(t0 + so, g0 + go), T.LoadHi(t0 + so)));
-                a1 = T.Xor(a1, T.Multiply(v, T.LoadLo(t1 + so, g1 + go), T.LoadHi(t1 + so)));
-                a2 = T.Xor(a2, T.Multiply(v, T.LoadLo(t2 + so, g2 + go), T.LoadHi(t2 + so)));
+                a0 = T.MultiplyAdd(a0, v, T.LoadLo(t0 + so, g0 + go), T.LoadHi(t0 + so));
+                a1 = T.MultiplyAdd(a1, v, T.LoadLo(t1 + so, g1 + go), T.LoadHi(t1 + so));
+                a2 = T.MultiplyAdd(a2, v, T.LoadLo(t2 + so, g2 + go), T.LoadHi(t2 + so));
             }
 
             Put(stream, dst0 + i, a0);
@@ -471,14 +555,14 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
                 hi2 = T.LoadHi(t2 + so);
                 lo3 = T.LoadLo(t3 + so, g3 + go);
                 hi3 = T.LoadHi(t3 + so);
-                a0 = T.Xor(a0, T.Multiply(va, lo0, hi0));
-                b0 = T.Xor(b0, T.Multiply(vb, lo0, hi0));
-                a1 = T.Xor(a1, T.Multiply(va, lo1, hi1));
-                b1 = T.Xor(b1, T.Multiply(vb, lo1, hi1));
-                a2 = T.Xor(a2, T.Multiply(va, lo2, hi2));
-                b2 = T.Xor(b2, T.Multiply(vb, lo2, hi2));
-                a3 = T.Xor(a3, T.Multiply(va, lo3, hi3));
-                b3 = T.Xor(b3, T.Multiply(vb, lo3, hi3));
+                a0 = T.MultiplyAdd(a0, va, lo0, hi0);
+                b0 = T.MultiplyAdd(b0, vb, lo0, hi0);
+                a1 = T.MultiplyAdd(a1, va, lo1, hi1);
+                b1 = T.MultiplyAdd(b1, vb, lo1, hi1);
+                a2 = T.MultiplyAdd(a2, va, lo2, hi2);
+                b2 = T.MultiplyAdd(b2, vb, lo2, hi2);
+                a3 = T.MultiplyAdd(a3, va, lo3, hi3);
+                b3 = T.MultiplyAdd(b3, vb, lo3, hi3);
             }
 
             Put(stream, dst0 + i, a0);
@@ -534,14 +618,14 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
                 v = T.Load(srcs[s] + i);
                 int so = s * MulTables.ShuffleEntrySize;
                 int go = s * MulTables.GfniEntrySize;
-                a0 = T.Xor(a0, T.Multiply(v, T.LoadLo(t0 + so, g0 + go), T.LoadHi(t0 + so)));
-                a1 = T.Xor(a1, T.Multiply(v, T.LoadLo(t1 + so, g1 + go), T.LoadHi(t1 + so)));
-                a2 = T.Xor(a2, T.Multiply(v, T.LoadLo(t2 + so, g2 + go), T.LoadHi(t2 + so)));
-                a3 = T.Xor(a3, T.Multiply(v, T.LoadLo(t3 + so, g3 + go), T.LoadHi(t3 + so)));
-                a4 = T.Xor(a4, T.Multiply(v, T.LoadLo(t4 + so, g4 + go), T.LoadHi(t4 + so)));
-                a5 = T.Xor(a5, T.Multiply(v, T.LoadLo(t5 + so, g5 + go), T.LoadHi(t5 + so)));
-                a6 = T.Xor(a6, T.Multiply(v, T.LoadLo(t6 + so, g6 + go), T.LoadHi(t6 + so)));
-                a7 = T.Xor(a7, T.Multiply(v, T.LoadLo(t7 + so, g7 + go), T.LoadHi(t7 + so)));
+                a0 = T.MultiplyAdd(a0, v, T.LoadLo(t0 + so, g0 + go), T.LoadHi(t0 + so));
+                a1 = T.MultiplyAdd(a1, v, T.LoadLo(t1 + so, g1 + go), T.LoadHi(t1 + so));
+                a2 = T.MultiplyAdd(a2, v, T.LoadLo(t2 + so, g2 + go), T.LoadHi(t2 + so));
+                a3 = T.MultiplyAdd(a3, v, T.LoadLo(t3 + so, g3 + go), T.LoadHi(t3 + so));
+                a4 = T.MultiplyAdd(a4, v, T.LoadLo(t4 + so, g4 + go), T.LoadHi(t4 + so));
+                a5 = T.MultiplyAdd(a5, v, T.LoadLo(t5 + so, g5 + go), T.LoadHi(t5 + so));
+                a6 = T.MultiplyAdd(a6, v, T.LoadLo(t6 + so, g6 + go), T.LoadHi(t6 + so));
+                a7 = T.MultiplyAdd(a7, v, T.LoadLo(t7 + so, g7 + go), T.LoadHi(t7 + so));
             }
 
             Put(stream, dst0 + i, a0);
@@ -591,10 +675,10 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
                 v = T.Load(srcs[s] + i);
                 int so = s * MulTables.ShuffleEntrySize;
                 int go = s * MulTables.GfniEntrySize;
-                a0 = T.Xor(a0, T.Multiply(v, T.LoadLo(t0 + so, g0 + go), T.LoadHi(t0 + so)));
-                a1 = T.Xor(a1, T.Multiply(v, T.LoadLo(t1 + so, g1 + go), T.LoadHi(t1 + so)));
-                a2 = T.Xor(a2, T.Multiply(v, T.LoadLo(t2 + so, g2 + go), T.LoadHi(t2 + so)));
-                a3 = T.Xor(a3, T.Multiply(v, T.LoadLo(t3 + so, g3 + go), T.LoadHi(t3 + so)));
+                a0 = T.MultiplyAdd(a0, v, T.LoadLo(t0 + so, g0 + go), T.LoadHi(t0 + so));
+                a1 = T.MultiplyAdd(a1, v, T.LoadLo(t1 + so, g1 + go), T.LoadHi(t1 + so));
+                a2 = T.MultiplyAdd(a2, v, T.LoadLo(t2 + so, g2 + go), T.LoadHi(t2 + so));
+                a3 = T.MultiplyAdd(a3, v, T.LoadLo(t3 + so, g3 + go), T.LoadHi(t3 + so));
             }
 
             Put(stream, dst0 + i, a0);
@@ -603,4 +687,166 @@ internal static unsafe class VectorKernel<T> where T : unmanaged, IGfVector<T>
             Put(stream, dst3 + i, a3);
         }
     }
+
+    /// <summary>Three NEON outputs over two vectors, sharing coefficient loads between the vectors.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void Block3x2(byte** srcs, int count, int stride, bool accumulate, bool stream, byte** dsts, byte* t0, byte* g0, nuint start, nuint end)
+    {
+        int w = Width;
+        nuint i = start;
+        byte* dst0 = dsts[0];
+        byte* dst1 = dsts[1];
+        byte* t1 = t0 + stride * MulTables.ShuffleEntrySize;
+        byte* g1 = g0 + stride * MulTables.GfniEntrySize;
+        byte* dst2 = dsts[2];
+        byte* t2 = t0 + 2 * stride * MulTables.ShuffleEntrySize;
+        byte* g2 = g0 + 2 * stride * MulTables.GfniEntrySize;
+        for (; i + (nuint)(2 * w) <= end; i += (nuint)(2 * w))
+        {
+            T va = T.Load(srcs[0] + i);
+            T vb = T.Load(srcs[0] + i + w);
+            T lo0 = T.LoadLo(t0, g0);
+            T hi0 = T.LoadHi(t0);
+            T a0 = T.Multiply(va, lo0, hi0);
+            if (accumulate) a0 = T.Xor(a0, T.Load(dst0 + i));
+            T b0 = T.Multiply(vb, lo0, hi0);
+            if (accumulate) b0 = T.Xor(b0, T.Load(dst0 + i + w));
+            T lo1 = T.LoadLo(t1, g1);
+            T hi1 = T.LoadHi(t1);
+            T a1 = T.Multiply(va, lo1, hi1);
+            if (accumulate) a1 = T.Xor(a1, T.Load(dst1 + i));
+            T b1 = T.Multiply(vb, lo1, hi1);
+            if (accumulate) b1 = T.Xor(b1, T.Load(dst1 + i + w));
+            T lo2 = T.LoadLo(t2, g2);
+            T hi2 = T.LoadHi(t2);
+            T a2 = T.Multiply(va, lo2, hi2);
+            if (accumulate) a2 = T.Xor(a2, T.Load(dst2 + i));
+            T b2 = T.Multiply(vb, lo2, hi2);
+            if (accumulate) b2 = T.Xor(b2, T.Load(dst2 + i + w));
+            for (int s = 1; s < count; s++)
+            {
+                va = T.Load(srcs[s] + i);
+                vb = T.Load(srcs[s] + i + w);
+                lo0 = T.LoadLo(t0 + s * MulTables.ShuffleEntrySize, g0 + s * MulTables.GfniEntrySize);
+                hi0 = T.LoadHi(t0 + s * MulTables.ShuffleEntrySize);
+                a0 = T.MultiplyAdd(a0, va, lo0, hi0);
+                b0 = T.MultiplyAdd(b0, vb, lo0, hi0);
+                lo1 = T.LoadLo(t1 + s * MulTables.ShuffleEntrySize, g1 + s * MulTables.GfniEntrySize);
+                hi1 = T.LoadHi(t1 + s * MulTables.ShuffleEntrySize);
+                a1 = T.MultiplyAdd(a1, va, lo1, hi1);
+                b1 = T.MultiplyAdd(b1, vb, lo1, hi1);
+                lo2 = T.LoadLo(t2 + s * MulTables.ShuffleEntrySize, g2 + s * MulTables.GfniEntrySize);
+                hi2 = T.LoadHi(t2 + s * MulTables.ShuffleEntrySize);
+                a2 = T.MultiplyAdd(a2, va, lo2, hi2);
+                b2 = T.MultiplyAdd(b2, vb, lo2, hi2);
+            }
+            Put(stream, dst0 + i, a0);
+            Put(stream, dst0 + i + w, b0);
+            Put(stream, dst1 + i, a1);
+            Put(stream, dst1 + i + w, b1);
+            Put(stream, dst2 + i, a2);
+            Put(stream, dst2 + i + w, b2);
+        }
+        if (i < end)
+            Block3(srcs, count, stride, accumulate, stream, dsts, t0, g0, i, end);
+    }
+
+    /// <summary>Five NEON outputs over two vectors, fitting ten accumulators in the Arm register file.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void Block5x2(byte** srcs, int count, int stride, bool accumulate, bool stream, byte** dsts, byte* t0, byte* g0, nuint start, nuint end)
+    {
+        int w = Width;
+        nuint i = start;
+        byte* dst0 = dsts[0];
+        byte* dst1 = dsts[1];
+        byte* t1 = t0 + stride * MulTables.ShuffleEntrySize;
+        byte* g1 = g0 + stride * MulTables.GfniEntrySize;
+        byte* dst2 = dsts[2];
+        byte* t2 = t0 + 2 * stride * MulTables.ShuffleEntrySize;
+        byte* g2 = g0 + 2 * stride * MulTables.GfniEntrySize;
+        byte* dst3 = dsts[3];
+        byte* t3 = t0 + 3 * stride * MulTables.ShuffleEntrySize;
+        byte* g3 = g0 + 3 * stride * MulTables.GfniEntrySize;
+        byte* dst4 = dsts[4];
+        byte* t4 = t0 + 4 * stride * MulTables.ShuffleEntrySize;
+        byte* g4 = g0 + 4 * stride * MulTables.GfniEntrySize;
+        for (; i + (nuint)(2 * w) <= end; i += (nuint)(2 * w))
+        {
+            T va = T.Load(srcs[0] + i);
+            T vb = T.Load(srcs[0] + i + w);
+            T lo0 = T.LoadLo(t0, g0);
+            T hi0 = T.LoadHi(t0);
+            T lo1 = T.LoadLo(t1, g1);
+            T hi1 = T.LoadHi(t1);
+            T lo2 = T.LoadLo(t2, g2);
+            T hi2 = T.LoadHi(t2);
+            T lo3 = T.LoadLo(t3, g3);
+            T hi3 = T.LoadHi(t3);
+            T lo4 = T.LoadLo(t4, g4);
+            T hi4 = T.LoadHi(t4);
+            T a0 = T.Multiply(va, lo0, hi0);
+            if (accumulate) a0 = T.Xor(a0, T.Load(dst0 + i));
+            T b0 = T.Multiply(vb, lo0, hi0);
+            if (accumulate) b0 = T.Xor(b0, T.Load(dst0 + i + w));
+            T a1 = T.Multiply(va, lo1, hi1);
+            if (accumulate) a1 = T.Xor(a1, T.Load(dst1 + i));
+            T b1 = T.Multiply(vb, lo1, hi1);
+            if (accumulate) b1 = T.Xor(b1, T.Load(dst1 + i + w));
+            T a2 = T.Multiply(va, lo2, hi2);
+            if (accumulate) a2 = T.Xor(a2, T.Load(dst2 + i));
+            T b2 = T.Multiply(vb, lo2, hi2);
+            if (accumulate) b2 = T.Xor(b2, T.Load(dst2 + i + w));
+            T a3 = T.Multiply(va, lo3, hi3);
+            if (accumulate) a3 = T.Xor(a3, T.Load(dst3 + i));
+            T b3 = T.Multiply(vb, lo3, hi3);
+            if (accumulate) b3 = T.Xor(b3, T.Load(dst3 + i + w));
+            T a4 = T.Multiply(va, lo4, hi4);
+            if (accumulate) a4 = T.Xor(a4, T.Load(dst4 + i));
+            T b4 = T.Multiply(vb, lo4, hi4);
+            if (accumulate) b4 = T.Xor(b4, T.Load(dst4 + i + w));
+            for (int s = 1; s < count; s++)
+            {
+                va = T.Load(srcs[s] + i);
+                vb = T.Load(srcs[s] + i + w);
+                lo0 = T.LoadLo(t0 + s * MulTables.ShuffleEntrySize, g0 + s * MulTables.GfniEntrySize);
+                hi0 = T.LoadHi(t0 + s * MulTables.ShuffleEntrySize);
+                lo1 = T.LoadLo(t1 + s * MulTables.ShuffleEntrySize, g1 + s * MulTables.GfniEntrySize);
+                hi1 = T.LoadHi(t1 + s * MulTables.ShuffleEntrySize);
+                lo2 = T.LoadLo(t2 + s * MulTables.ShuffleEntrySize, g2 + s * MulTables.GfniEntrySize);
+                hi2 = T.LoadHi(t2 + s * MulTables.ShuffleEntrySize);
+                lo3 = T.LoadLo(t3 + s * MulTables.ShuffleEntrySize, g3 + s * MulTables.GfniEntrySize);
+                hi3 = T.LoadHi(t3 + s * MulTables.ShuffleEntrySize);
+                lo4 = T.LoadLo(t4 + s * MulTables.ShuffleEntrySize, g4 + s * MulTables.GfniEntrySize);
+                hi4 = T.LoadHi(t4 + s * MulTables.ShuffleEntrySize);
+                a0 = T.MultiplyAdd(a0, va, lo0, hi0);
+                b0 = T.MultiplyAdd(b0, vb, lo0, hi0);
+                a1 = T.MultiplyAdd(a1, va, lo1, hi1);
+                b1 = T.MultiplyAdd(b1, vb, lo1, hi1);
+                a2 = T.MultiplyAdd(a2, va, lo2, hi2);
+                b2 = T.MultiplyAdd(b2, vb, lo2, hi2);
+                a3 = T.MultiplyAdd(a3, va, lo3, hi3);
+                b3 = T.MultiplyAdd(b3, vb, lo3, hi3);
+                a4 = T.MultiplyAdd(a4, va, lo4, hi4);
+                b4 = T.MultiplyAdd(b4, vb, lo4, hi4);
+            }
+            Put(stream, dst0 + i, a0);
+            Put(stream, dst0 + i + w, b0);
+            Put(stream, dst1 + i, a1);
+            Put(stream, dst1 + i + w, b1);
+            Put(stream, dst2 + i, a2);
+            Put(stream, dst2 + i + w, b2);
+            Put(stream, dst3 + i, a3);
+            Put(stream, dst3 + i + w, b3);
+            Put(stream, dst4 + i, a4);
+            Put(stream, dst4 + i + w, b4);
+        }
+        if (i < end)
+        {
+            Block4(srcs, count, stride, accumulate, stream, dsts, t0, g0, i, end);
+            Block1(srcs, count, stride, accumulate, stream, dsts + 4,
+                t0 + 4 * stride * MulTables.ShuffleEntrySize,
+                g0 + 4 * stride * MulTables.GfniEntrySize, i, end);
+        }
+    }
+
 }

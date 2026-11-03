@@ -3,6 +3,34 @@ namespace ReedSolomonFast.Tests;
 /// <summary>Checks changed-shard batches against fresh scalar encoding across vector and batch boundaries, layouts and parallel splits.</summary>
 public class UpdateBatchTests
 {
+    [Theory]
+    [InlineData(2)]
+    [InlineData(4)]
+    [InlineData(8)]
+    [InlineData(20)]
+    public void Update_MultipleParityCountsMatchFreshEncoding(int parityCount)
+    {
+        const int dataCount = 10, changes = 8, length = 131_073, offset = 3;
+        var random = new Random(4808 + parityCount);
+        var storage = ReedSolomon.AllocateShards(dataCount + parityCount + changes, length + offset);
+        foreach (var m in storage) random.NextBytes(m.Span);
+        var guards = storage.SelectMany(m => m.Span[..offset].ToArray()).ToArray();
+        var buffers = storage.Select(m => m.Slice(offset, length)).ToArray();
+        var data = buffers.Take(dataCount).Select(m => (ReadOnlyMemory<byte>)m).ToArray();
+        var parity = buffers.Skip(dataCount).Take(parityCount).ToArray();
+        var indices = Enumerable.Range(0, changes).ToArray();
+        var oldData = indices.Select(i => data[i]).ToArray();
+        var newData = buffers.Skip(dataCount + parityCount).Select(m => (ReadOnlyMemory<byte>)m).ToArray();
+        var coder = new ReedSolomon(dataCount, parityCount);
+        coder.Encode(data, parity);
+        coder.Update(indices, oldData, newData, parity);
+        for (int i = 0; i < changes; i++) data[indices[i]] = newData[i];
+        var expected = ReedSolomon.AllocateShards(parityCount, length);
+        new ReedSolomon(dataCount, parityCount, new ReedSolomonOptions { Kernel = KernelTier.Scalar }).Encode(data, expected);
+        for (int p = 0; p < parityCount; p++) Assert.True(expected[p].Span.SequenceEqual(parity[p].Span));
+        Assert.Equal(guards, storage.SelectMany(m => m.Span[..offset].ToArray()).ToArray());
+    }
+
     public static IEnumerable<object[]> Cases()
     {
         foreach (KernelTier tier in Enum.GetValues<KernelTier>())
@@ -17,7 +45,7 @@ public class UpdateBatchTests
         if (!KernelTestHelpers.IsSupported(tier)) return;
         var random = new Random(701 + changes);
         int[] lengths = [0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 961,
-            65_535, 65_536, 65_537, 65_551, 65_567, 65_599, 65_663];
+            32_767, 32_768, 32_769, 65_535, 65_536, 65_537, 65_551, 65_567, 65_599, 65_663, 131_073];
         foreach (int length in lengths)
         foreach (bool padded in new[] { false, true })
         foreach (int workers in new[] { 1, 3 })

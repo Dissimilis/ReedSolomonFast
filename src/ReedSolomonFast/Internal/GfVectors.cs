@@ -41,6 +41,10 @@ internal unsafe interface IGfVector<TSelf> where TSelf : unmanaged, IGfVector<TS
 
     /// <summary>Multiplies every byte of <paramref name="v"/> by the multiplier's constant.</summary>
     static abstract TSelf Multiply(TSelf v, TSelf lo, TSelf hi);
+
+    /// <summary>XORs a product into the accumulator; implementations may fuse the three XOR operands.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static virtual TSelf MultiplyAdd(TSelf acc, TSelf v, TSelf lo, TSelf hi) => TSelf.Xor(acc, TSelf.Multiply(v, lo, hi));
 }
 
 /// <summary>SSSE3: 16-byte <c>PSHUFB</c> lookups on the low and high nibbles.</summary>
@@ -273,4 +277,21 @@ internal readonly unsafe struct AdvSimdVec : IGfVector<AdvSimdVec>
         Vector128<byte> high = AdvSimd.ShiftRightLogical(v.V, 4);
         return new(AdvSimd.Arm64.VectorTableLookup(lo.V, low) ^ AdvSimd.Arm64.VectorTableLookup(hi.V, high));
     }
+
+#pragma warning disable SYSLIB5003
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static AdvSimdVec MultiplyAdd(AdvSimdVec acc, AdvSimdVec v, AdvSimdVec lo, AdvSimdVec hi)
+    {
+        // The managed vector used by SVE2 must match NEON's 16-byte width.
+        if (Sve2.IsSupported && System.Numerics.Vector<byte>.Count == 16)
+        {
+            var low = v.V & Vector128.Create((byte)15);
+            var high = AdvSimd.ShiftRightLogical(v.V, 4);
+            var a = AdvSimd.Arm64.VectorTableLookup(lo.V, low);
+            var b = AdvSimd.Arm64.VectorTableLookup(hi.V, high);
+            return new(Vector128.AsVector128(Sve2.Xor(Vector128.AsVector(acc.V), Vector128.AsVector(a), Vector128.AsVector(b))));
+        }
+        return Xor(acc, Multiply(v, lo, hi));
+    }
+#pragma warning restore SYSLIB5003
 }

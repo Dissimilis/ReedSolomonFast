@@ -75,6 +75,36 @@ public unsafe class KernelTests
 
     public static IEnumerable<object[]> Tiers() => KernelTestHelpers.AllTiers.Select(t => new object[] { t });
 
+    [Theory]
+    [MemberData(nameof(Tiers))]
+    public void DotProduct_OutputBoundaries_PreserveGuardsAndAccumulate(KernelTier tier)
+    {
+        if (!KernelTestHelpers.IsSupported(tier)) return;
+        var rng = new Random(4803);
+        const int offset = 3, guard = 17;
+        foreach (int srcCount in new[] { 1, 11, 13 })
+        foreach (int dstCount in new[] { 3, 5, 6, 7, 8, 9, 10, 11, 14, 20, 21 })
+        foreach (int len in new[] { 15, 16, 17, 31, 32, 33, 65, 257 })
+        foreach (bool accumulate in new[] { false, true })
+        {
+            var srcs = Enumerable.Range(0, srcCount).Select(_ => KernelTestHelpers.RandomBytes(offset + len + guard, rng)).ToArray();
+            var dsts = Enumerable.Range(0, dstCount).Select(_ => KernelTestHelpers.RandomBytes(offset + len + guard, rng)).ToArray();
+            var initial = dsts.Select(d => d.ToArray()).ToArray();
+            var coef = KernelTestHelpers.RandomBytes(srcCount * dstCount, rng);
+            var expected = KernelTestHelpers.ReferenceDotProduct(srcs, coef, dstCount, len, offset);
+            KernelTestHelpers.Invoke(tier, srcs, dsts, coef, len, offset, accumulate);
+            for (int d = 0; d < dstCount; d++)
+            {
+                Assert.Equal(initial[d][..offset], dsts[d][..offset]);
+                Assert.Equal(initial[d][(offset + len)..], dsts[d][(offset + len)..]);
+                if (accumulate)
+                    for (int i = 0; i < len; i++) expected[d][i] ^= initial[d][offset + i];
+                Assert.True(expected[d].AsSpan().SequenceEqual(dsts[d].AsSpan(offset, len)),
+                    $"tier={tier} srcs={srcCount} dsts={dstCount} len={len} accumulate={accumulate} dst={d}");
+            }
+        }
+    }
+
     [Fact]
     public void EveryTier_HasAnIsSupportedAnswer()
     {
@@ -139,5 +169,34 @@ public unsafe class KernelTests
             for (int i = 0; i < len; i++)
                 Assert.True(Gf256Reference.Multiply((byte)c, src[offset + i]) == dst[offset + i], $"tier={tier} coef={c} byte={i}");
         }
+    }
+
+    [Theory]
+    [MemberData(nameof(Tiers))]
+    public void DotProduct_MultiplyAdd_EveryCoefficientAndByte_MatchesReference(KernelTier tier)
+    {
+        if (!KernelTestHelpers.IsSupported(tier)) return;
+        const int offset = 3, len = 257, guard = 17;
+        var first = new byte[offset + len + guard];
+        var second = new byte[first.Length];
+        for (int i = 0; i < first.Length; i++) { first[i] = (byte)(i * 17 + 39); second[i] = (byte)i; }
+        foreach (int outputs in new[] { 1, 2, 4, 5 })
+            for (int c = 0; c < 256; c++)
+                foreach (bool accumulate in new[] { false, true })
+                {
+                    var coef = Enumerable.Range(0, outputs).SelectMany(_ => new byte[] { 1, (byte)c }).ToArray();
+                    var dst = Enumerable.Range(0, outputs).Select(_ => Enumerable.Repeat((byte)0xA5, first.Length).ToArray()).ToArray();
+                    KernelTestHelpers.Invoke(tier, [first, second], dst, coef, len, offset, accumulate);
+                    foreach (var row in dst)
+                    {
+                        Assert.True(row.AsSpan(0, offset).IndexOfAnyExcept((byte)0xA5) < 0);
+                        Assert.True(row.AsSpan(offset + len, guard).IndexOfAnyExcept((byte)0xA5) < 0);
+                        for (int i = 0; i < len; i++)
+                        {
+                            byte expected = (byte)(first[offset + i] ^ Gf256Reference.Multiply((byte)c, second[offset + i]) ^ (accumulate ? 0xA5 : 0));
+                            Assert.True(row[offset + i] == expected, $"tier={tier} outputs={outputs} coefficient={c} byte={i} accumulate={accumulate}");
+                        }
+                    }
+                }
     }
 }
